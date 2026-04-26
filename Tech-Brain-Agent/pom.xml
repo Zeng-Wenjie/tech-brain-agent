@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.agent</groupId>
+        <artifactId>Tech-Brain</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+
+    <artifactId>Tech-Brain-Agent</artifactId>
+
+    <properties>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <dependencies>
+        <!--实体类模块-->
+        <dependency>
+            <groupId>com.agent</groupId>
+            <artifactId>Teach-Brain-Entity</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <!--AOP模块-->
+        <dependency>
+        <groupId>com.agent</groupId>
+        <artifactId>Tech-Brain-AOP</artifactId>
+        <version>${project.version}</version>
+        </dependency>
+        <!--Notes模块-->
+        <dependency>
+            <groupId>com.agent</groupId>
+            <artifactId>Tech-Brain-Notes</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+
+        <!--GeminiAPI-->
+        <dependency>
+            <groupId>com.google.genai</groupId>
+            <artifactId>google-genai</artifactId>
+            <version>1.0.0</version>
+        </dependency>
+        <!--langchain4j框架-->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-google-ai-gemini</artifactId>
+        </dependency>
+    <!--LangChain4j 的 Redis 依赖-->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-redis</artifactId>
+        </dependency>
+        <!--向量模型依赖-->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-embeddings-bge-small-zh-v15</artifactId>
+        </dependency>
+    </dependencies>
+<!--在阿里云仓库调用-->
+    <repositories>
+        <repository>
+            <id>aliyunmaven</id>
+            <name>aliyun public</name>
+            <url>https://maven.aliyun.com/repository/public</url>
+            <releases>
+                <enabled>true</enabled>
+            </releases>
+            <snapshots>
+                <enabled>false</enabled>
+            </snapshots>
+        </repository>
+    </repositories>
+
+</project>

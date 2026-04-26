@@ -1,0 +1,20 @@
+#配置Mysql
+spring:
+  application:
+    name: springboot-agent
+
+  datasource:
+    url: jdbc:mysql://localhost:3306/agent
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    username: root
+    password: zwj12052238
+
+mybatis-plus:
+  configuration:
+    # 打印 SQL 日志到控制台（开发环境必备）
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+    # 开启数据库下划线字段到 Java 驼峰属性的映射（MP 默认开启，显式配置更清晰）
+    map-underscore-to-camel-case: true
+#   Mapper扫描配置
+  mapper-locations: classpath*:/mapper/**/*.xml
+  type-aliases-package: com.agent.entity
