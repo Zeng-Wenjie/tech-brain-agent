@@ -39,6 +39,7 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
 //        article.setTags(dto.getTags());
 
         BeanUtils.copyProperties(dto,article);//拷贝属性
+
         // 设定 sourceType 为 1，代表来源是 AI 生成（根据你自己的表设计规范调整）
         article.setSourceType(GenerateContant.ARTICLE_SOURCE_TYPE_AI);
         article.setCreateTime(LocalDateTime.now());

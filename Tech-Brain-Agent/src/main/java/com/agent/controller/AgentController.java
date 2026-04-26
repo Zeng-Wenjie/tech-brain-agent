@@ -4,15 +4,22 @@ import com.agent.AgentService;
 import com.agent.aopanno.Log;
 import com.agent.entity.ArticleSaveDTO;
 import com.agent.entity.Result;
+import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.model.googleai.GoogleAiGeminiChatModel;
+import dev.langchain4j.store.embedding.EmbeddingMatch;
+import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
+import dev.langchain4j.store.embedding.EmbeddingSearchResult;
 import dev.langchain4j.store.embedding.EmbeddingStore;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+import java.util.stream.Collectors;
 
 @Tag(name = "AI 问答与笔记管理")
 @Slf4j
@@ -36,10 +43,27 @@ public class AgentController {
     @GetMapping("/api/chat")
     public Result<String> chat(@RequestParam String msg) {
         log.info("接收到前端提问: {}", msg); // 打印请求参数//接收参数
-        //
+        //RAG编写：
+        // 将用户的提问转为向量
+        Embedding embedding = embeddingModel.embed(msg).content();
+        //构建查询参数
+        EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
+                .queryEmbedding(embedding)
+                .maxResults(3)//最大返回条数为3
+                .minScore(0.7)//最低相似度阔值为0.7
+                .build();//构建查询参数
 
+        //去Redis向量库进行相似度搜索
+        EmbeddingSearchResult<TextSegment> searchResult = embeddingStore.search(searchRequest);
+        List<EmbeddingMatch<TextSegment>> relatedEmbeddings = searchResult.matches();
+
+        String context = relatedEmbeddings.stream()
+                .map(match -> match.embedded().text())
+                .collect(Collectors.joining("\n\n"));
+
+        String prompt = "基于以下参考资料回答问题：\n" + context + "\n\n问题：" + msg;
         // 发送消息并获取回复
-        String response = model.generate(msg);
+        String response = model.generate(prompt);
         log.info("大模型生成完毕，准备返回: {}", response);
         // 打印返回结果
         return Result.success(response);
