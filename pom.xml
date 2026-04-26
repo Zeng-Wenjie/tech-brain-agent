@@ -88,6 +88,13 @@
             <version>${spring-boot-starter-aop.version}</version>
             <scope>compile</scope>
         </dependency>
+<!--knife4j文档（swagger增强）-->
+        <dependency>
+            <groupId>com.github.xiaoymin</groupId>
+            <artifactId>knife4j-openapi3-jakarta-spring-boot-starter</artifactId>
+            <version>4.5.0</version>
+            <scope>compile</scope>
+        </dependency>
     </dependencies>
 
     <!--子类依赖版本管理-->

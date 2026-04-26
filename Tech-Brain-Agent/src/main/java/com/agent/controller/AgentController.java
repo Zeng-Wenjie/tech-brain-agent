@@ -8,15 +8,18 @@ import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.model.googleai.GoogleAiGeminiChatModel;
 import dev.langchain4j.store.embedding.EmbeddingStore;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
+@Tag(name = "AI 问答与笔记管理")
 @Slf4j
 @RestController
 public class AgentController {
     @Autowired
-            private AgentService agentService;
+    private AgentService agentService;
     @Autowired
     private EmbeddingModel embeddingModel;//注入向量模型
     @Autowired
@@ -28,6 +31,7 @@ public class AgentController {
             .modelName("gemini-3-flash-preview")//模型名称
             .build();//创建模型
 
+    @Operation(summary = "智能 RAG 对话接口")
     @Log
     @GetMapping("/api/chat")
     public Result<String> chat(@RequestParam String msg) {
@@ -41,15 +45,16 @@ public class AgentController {
         return Result.success(response);
     }
 
+    @Operation(summary = "保存笔记接口")
     @Log
     @PostMapping("/save-note")
     public Result<String> saveNote(@RequestBody ArticleSaveDTO dto) {
         // 基础参数校验
         if (dto.getTitle() == null || dto.getTitle().trim().isEmpty()) {
-            return Result.error(400,"笔记标题不能为空");
+            return Result.error(400, "笔记标题不能为空");
         }
         if (dto.getContent() == null || dto.getContent().trim().isEmpty()) {
-            return Result.error(400,"笔记内容不能为空");
+            return Result.error(400, "笔记内容不能为空");
         }
 
         // 执行入库
