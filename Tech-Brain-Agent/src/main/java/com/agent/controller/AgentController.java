@@ -63,7 +63,10 @@ public class AgentController {
                 .map(match -> match.embedded().text())
                 .collect(Collectors.joining("\n\n"));
 
-        String prompt = "基于以下参考资料回答问题：\n" + context + "\n\n问题：" + msg;
+        String prompt = "你是一个智能技术助手。请优先基于以下参考资料回答用户问题。\n" +
+                "参考资料：\n" + context + "\n\n" +
+                "如果参考资料不足以完全解答，或者可以提供更有价值的扩展技术背景，请结合你的专业知识进行适当补充。\n" +
+                "用户问题：" + msg;
         // 发送消息并获取回复
         String response = model.generate(prompt);
         log.info("大模型生成完毕，准备返回: {}", response);
