@@ -50,12 +50,14 @@ public class AgentController {
         EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
                 .queryEmbedding(embedding)
                 .maxResults(3)//最大返回条数为3
-                .minScore(0.7)//最低相似度阔值为0.7
+                .minScore(0.4)//最低相似度阔值为0.7
                 .build();//构建查询参数
 
         //去Redis向量库进行相似度搜索
         EmbeddingSearchResult<TextSegment> searchResult = embeddingStore.search(searchRequest);
         List<EmbeddingMatch<TextSegment>> relatedEmbeddings = searchResult.matches();
+        // 确认是不是查出来为 0
+        log.info("=== 核心排查：从 Redis 中检索到的数据条数：{} ===", relatedEmbeddings.size());
 
         String context = relatedEmbeddings.stream()
                 .map(match -> match.embedded().text())
