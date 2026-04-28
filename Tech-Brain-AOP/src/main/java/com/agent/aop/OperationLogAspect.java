@@ -38,8 +38,21 @@ public class OperationLogAspect {
         operationLog.setOperateTime(LocalDateTime.now());
         operationLog.setClassName(joinPoint.getTarget().getClass().getName());
         operationLog.setMethodName(methodName);
-        operationLog.setMethodParams(Arrays.toString(joinPoint.getArgs()));
-        operationLog.setReturnValue(result!=null?result.toString():"void");
+        // 1. 处理请求参数：转为字符串并截断超长部分
+        String params = Arrays.toString(joinPoint.getArgs());
+        if (params != null && params.length() > 200) {
+            // 如果你的数据库字段只有 255，请把这里的 2000 改成 200
+            params = params.substring(0, 200) + "...(数据过长已截断)";
+        }
+        operationLog.setMethodParams(params);
+
+        // 2. 处理返回值：转为字符串并截断超长部分
+        String retValue = result != null ? result.toString() : "void";
+        if (retValue != null && retValue.length() > 200) {
+            // 如果你的数据库字段只有 255，请把这里的 2000 改成 200
+            retValue = retValue.substring(0, 200) + "...(数据过长已截断)";
+        }
+        operationLog.setReturnValue(retValue);
         operationLog.setCostTime(costTime);
         operationLohMapper.insert(operationLog);
         return result;

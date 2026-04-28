@@ -18,3 +18,7 @@ mybatis-plus:
 #   Mapper扫描配置
   mapper-locations: classpath*:/mapper/**/*.xml
   type-aliases-package: com.agent.entity
+  global-config:
+    db-config:
+      id-type:
+      logic-delete-field: deleteFlag #配置逻辑删除字段

@@ -20,5 +20,7 @@ public class Article {
     // 更新时自动填充时间
     @TableField(fill = FieldFill.INSERT_UPDATE)
     private LocalDateTime updateTime;
+//    逻辑删除字段
+    private Boolean deleteFlag;
 
 }

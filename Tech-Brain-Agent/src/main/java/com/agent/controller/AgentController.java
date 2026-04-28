@@ -39,8 +39,7 @@ public class AgentController {
             .build();//创建模型
 
     @Operation(summary = "智能 RAG 对话接口")
-    @Log
-    @GetMapping("/api/chat")
+    @GetMapping("/chat")
     public Result<String> chat(@RequestParam String msg) {
         log.info("接收到前端提问: {}", msg); // 打印请求参数//接收参数
         //RAG编写：
