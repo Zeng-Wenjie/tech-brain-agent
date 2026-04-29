@@ -21,4 +21,4 @@ mybatis-plus:
   global-config:
     db-config:
       id-type:
-      logic-delete-field: deleteFlag #配置逻辑删除字段
+      logic-delete-field:  #配置逻辑删除字段

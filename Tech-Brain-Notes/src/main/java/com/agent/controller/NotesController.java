@@ -4,6 +4,8 @@ import com.agent.aopanno.Log;
 import com.agent.entity.Article;
 import com.agent.entity.Result;
 import com.agent.mapper.NotesMapper;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import io.swagger.v3.oas.annotations.Operation;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
@@ -18,7 +20,7 @@ public class NotesController {
     @Autowired
     private NotesMapper articleMapper;
 
-    @Log
+    //这里进行分页查询操作
     @GetMapping
     public Result getArticle() {
         log.info("查询成功");
@@ -26,24 +28,26 @@ public class NotesController {
         return Result.success(articleList);
     }
 
-    @Log
-    @PostMapping
-    public Result addArticle(@RequestBody Article article) {
-        log.info("添加成功:{}" ,article);
-        article.setSourceType(2);
-        article.setCreateTime(LocalDateTime.now());
-        article.setUpdateTime(LocalDateTime.now());
-        articleMapper.insert(article);
-        return Result.success(article);
+
+//    @Log
+//    @DeleteMapping("/{id}")
+//    public Result deleteArticle(@PathVariable Long id) {
+//        log.info("删除成功:{}" ,id);
+//        articleMapper.deleteById(id);
+//        return Result.success("删除成功");
+//    }
+
+    //批量删除
+    @Operation(summary = "批量删除")
+    @DeleteMapping("/batch")
+    public Result deleteArticle(@RequestBody List<Long> ids) {
+        Long currentUserId = 1L;
+        LambdaQueryWrapper<Article> wrapper = new LambdaQueryWrapper<>();
+        wrapper.in(Article::getId,ids).eq(Article::getUserId,currentUserId);
+        articleMapper.delete(wrapper);
+        return Result.success("批量删除成功");
     }
 
-    @Log
-    @DeleteMapping("/{id}")
-    public Result deleteArticle(@PathVariable Long id) {
-        log.info("删除成功:{}" ,id);
-        articleMapper.deleteById(id);
-        return Result.success("删除成功");
-    }
 
     @Log
     @PutMapping
