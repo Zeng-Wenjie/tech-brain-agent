@@ -39,6 +39,10 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
 //        article.setTags(dto.getTags());
 
         BeanUtils.copyProperties(dto,article);//拷贝属性
+        //根据用户ID新增
+        // TODO: 目前登录模块还没做。等 JWT 做完后，把这行删掉，改成从 ThreadLocal 里拿真实 ID
+        Long currentUserId = 1L;
+        article.setUserId(currentUserId);
 
         // 设定 sourceType 为 1，代表来源是 AI 生成（根据你自己的表设计规范调整）
         article.setSourceType(GenerateContant.ARTICLE_SOURCE_TYPE_AI);

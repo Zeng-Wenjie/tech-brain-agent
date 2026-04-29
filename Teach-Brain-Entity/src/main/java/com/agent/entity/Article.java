@@ -10,7 +10,8 @@ import java.time.LocalDateTime;
 public class Article {
     @TableId(type = IdType.AUTO)
     private Long id;//主键ID
-    private Long userId;
+    @TableField(fill = FieldFill.INSERT)
+    private Long userId;//用户ID
     private String title;//笔记标题
     private String content;//详情内容
     private Integer sourceType;//来源类型

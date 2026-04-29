@@ -28,22 +28,28 @@ public class NotesController {
         return Result.success(articleList);
     }
 
-
-//    @Log
-//    @DeleteMapping("/{id}")
-//    public Result deleteArticle(@PathVariable Long id) {
-//        log.info("删除成功:{}" ,id);
-//        articleMapper.deleteById(id);
-//        return Result.success("删除成功");
-//    }
+//单删
+    @Log
+    @DeleteMapping("/{id}")
+    public Result deleteArticle(@PathVariable Long id) {
+        log.info("删除成功:{}" ,id);
+        // TODO: 目前登录模块还没做。等 JWT 做完后，把这行删掉，改成从 ThreadLocal 里拿真实 ID
+        Long currentUserId = 1L;
+        LambdaQueryWrapper<Article> wrapper = new LambdaQueryWrapper<>();
+        wrapper.in(Article::getId,id).eq(Article::getUserId,currentUserId);
+        articleMapper.delete(wrapper);
+        return Result.success("删除成功");
+    }
 
     //批量删除
     @Operation(summary = "批量删除")
     @DeleteMapping("/batch")
     public Result deleteArticle(@RequestBody List<Long> ids) {
+        log.info("批量删除成功:{}" ,ids);
+        // TODO: 目前登录模块还没做。等 JWT 做完后，把这行删掉，改成从 ThreadLocal 里拿真实 ID
         Long currentUserId = 1L;
         LambdaQueryWrapper<Article> wrapper = new LambdaQueryWrapper<>();
-        wrapper.in(Article::getId,ids).eq(Article::getUserId,currentUserId);
+        wrapper.eq(Article::getId,ids).eq(Article::getUserId,currentUserId);
         articleMapper.delete(wrapper);
         return Result.success("批量删除成功");
     }
