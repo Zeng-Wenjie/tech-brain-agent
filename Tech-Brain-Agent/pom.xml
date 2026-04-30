@@ -65,6 +65,7 @@
             <groupId>dev.langchain4j</groupId>
             <artifactId>langchain4j-embeddings-bge-small-zh-v15</artifactId>
         </dependency>
+
     </dependencies>
 <!--在阿里云仓库调用-->
     <repositories>
