@@ -30,6 +30,7 @@
         <module>Teach-Brain-Entity</module>
         <module>Tech-Brain-Notes</module>
         <module>Tech-Brain-AOP</module>
+        <module>Tech-Bain-Login</module>
     </modules>
 
     <scm>
@@ -135,6 +136,7 @@
                 <artifactId>langchain4j-embeddings-bge-small-zh-v15</artifactId>
                 <version>${langchain4j-embeddings-bge-small-zh-v15}</version>
             </dependency>
+
     </dependencies>
     </dependencyManagement>
 

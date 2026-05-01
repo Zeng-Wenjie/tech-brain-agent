@@ -4,6 +4,7 @@ import com.agent.constant.GenerateContant;
 import com.agent.entity.Article;
 import com.agent.entity.ArticleSaveDTO;
 import com.agent.mapper.AgentMapper;
+import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
@@ -40,8 +41,8 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
 
         BeanUtils.copyProperties(dto,article);//拷贝属性
         //根据用户ID新增
-        // TODO: 目前登录模块还没做。等 JWT 做完后，把这行删掉，改成从 ThreadLocal 里拿真实 ID
-        Long currentUserId = 1L;
+        //在ThreadLocal 中获取当前用户ID
+        Long currentUserId = UserContext.getUserId();
         article.setUserId(currentUserId);
 
         // 设定 sourceType 为 1，代表来源是 AI 生成（根据你自己的表设计规范调整）

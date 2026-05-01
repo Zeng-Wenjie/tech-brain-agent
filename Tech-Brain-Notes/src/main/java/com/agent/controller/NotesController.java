@@ -6,6 +6,7 @@ import com.agent.entity.PageDTO;
 import com.agent.entity.PageQuery;
 import com.agent.entity.Result;
 import com.agent.mapper.NotesMapper;
+import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import io.swagger.v3.oas.annotations.Operation;
@@ -31,8 +32,9 @@ public class NotesController {
 
         // 2. 构造查询条件
         LambdaQueryWrapper<Article> wrapper = new LambdaQueryWrapper<>();
-        // TODO: 目前登录模块还没做。等 JWT 做完后，改从 ThreadLocal 拿
-        Long currentUserId = 1L;
+
+        //在ThreadLocal 中获取当前用户ID
+        Long currentUserId = UserContext.getUserId();
         wrapper.eq(Article::getUserId, currentUserId);
 
         // 3. 添加排序, 默认按更新时间降序
@@ -55,8 +57,8 @@ public class NotesController {
     @DeleteMapping("/{id}")
     public Result deleteArticle(@PathVariable Long id) {
         log.info("删除成功:{}" ,id);
-        // TODO: 目前登录模块还没做。等 JWT 做完后，把这行删掉，改成从 ThreadLocal 里拿真实 ID
-        Long currentUserId = 1L;
+        //在ThreadLocal 中获取当前用户ID
+        Long currentUserId = UserContext.getUserId();
         LambdaQueryWrapper<Article> wrapper = new LambdaQueryWrapper<>();
         wrapper.in(Article::getId,id).eq(Article::getUserId,currentUserId);
         articleMapper.delete(wrapper);
@@ -68,8 +70,8 @@ public class NotesController {
     @DeleteMapping("/batch")
     public Result deleteArticle(@RequestBody List<Long> ids) {
         log.info("批量删除成功:{}" ,ids);
-        // TODO: 目前登录模块还没做。等 JWT 做完后，把这行删掉，改成从 ThreadLocal 里拿真实 ID
-        Long currentUserId = 1L;
+        //在ThreadLocal 中获取当前用户ID
+        Long currentUserId = UserContext.getUserId();
         LambdaQueryWrapper<Article> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(Article::getId,ids).eq(Article::getUserId,currentUserId);
         articleMapper.delete(wrapper);

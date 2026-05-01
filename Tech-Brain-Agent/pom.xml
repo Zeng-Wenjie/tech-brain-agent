@@ -38,6 +38,18 @@
             <artifactId>Tech-Brain-Notes</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <!--Login模块-->
+        <dependency>
+            <groupId>com.agent</groupId>
+            <artifactId>Tech-Bain-Login</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>com.agent</groupId>
+            <artifactId>Tech-Bain-Login</artifactId>
+            <version>${project.version}</version>
+        </dependency>
 
 
         <!--GeminiAPI-->

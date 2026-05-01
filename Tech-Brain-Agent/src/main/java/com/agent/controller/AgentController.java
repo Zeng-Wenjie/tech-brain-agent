@@ -16,6 +16,7 @@ import dev.langchain4j.store.embedding.EmbeddingSearchResult;
 import dev.langchain4j.store.embedding.EmbeddingStore;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
@@ -81,10 +82,10 @@ public class AgentController {
     public Result<String> saveNote(@RequestBody ArticleSaveDTO dto) {
         // 基础参数校验
         if (dto.getTitle() == null || dto.getTitle().trim().isEmpty()) {
-            return Result.error(400, "笔记标题不能为空");
+            return Result.error(HttpServletResponse.SC_BAD_REQUEST, "笔记标题不能为空");
         }
         if (dto.getContent() == null || dto.getContent().trim().isEmpty()) {
-            return Result.error(400, "笔记内容不能为空");
+            return Result.error(HttpServletResponse.SC_BAD_REQUEST, "笔记内容不能为空");
         }
         // 执行入库
         agentService.saveAiNote(dto);
