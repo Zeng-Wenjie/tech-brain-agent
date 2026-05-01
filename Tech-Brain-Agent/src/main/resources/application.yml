@@ -22,3 +22,7 @@ mybatis-plus:
     db-config:
       id-type:
       logic-delete-field:  #配置逻辑删除字段
+
+springdoc:
+  # 关闭 SpringDoc 自动扫描全局异常响应的功能，避开底层的兼容性 Bug
+  override-with-generic-response: false

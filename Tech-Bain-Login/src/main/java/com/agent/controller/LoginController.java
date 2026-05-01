@@ -2,6 +2,7 @@ package com.agent.controller;
 
 import com.agent.entity.Result;
 import com.agent.entity.User;
+import com.agent.entity.UserAuthDTO;
 import com.agent.entity.UserInfo;
 import com.agent.mapper.LoginMapper;
 import com.agent.utils.JwtUtils;
@@ -9,7 +10,9 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletResponse;
+import jakarta.validation.Valid;
 import lombok.extern.slf4j.Slf4j;
+import org.mindrot.jbcrypt.BCrypt;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -24,15 +27,21 @@ public class LoginController {
 
     @Operation(summary = "登录接口")
     @PostMapping("/login")
-    public Result<UserInfo> login(@RequestBody User user) {
-        log.info("用户登录：{}", user);
-        //判断密码是否正确
+    public Result<UserInfo> login(@RequestBody @Valid UserAuthDTO dto) {
+        log.info("用户登录：{}", dto.getUsername());
+        // 根据用户名查询用户
         User loginUser = loginMapper.selectOne(new LambdaQueryWrapper<User>()
-                .eq(User::getUsername, user.getUsername())
-                .eq(User::getPassword, user.getPassword()));
+                .eq(User::getUsername, dto.getUsername()));
         if (loginUser == null) {
             return Result.error(HttpServletResponse.SC_BAD_REQUEST,"用户名或密码错误");
         }
+
+        //密码校验，调用BCrypt.checkpw方法
+        boolean isPasswordMath = BCrypt.checkpw(dto.getPassword(), loginUser.getPassword());
+        if (!isPasswordMath) {
+            return Result.error(HttpServletResponse.SC_BAD_REQUEST,"用户名或密码错误");
+        }
+
         log.info("账号密码正确：{}", loginUser);
         // 生成Token
         String token = JwtUtils.createToken(loginUser.getId(), loginUser.getUsername());
@@ -46,4 +55,6 @@ public class LoginController {
 
         return Result.success(userInfo);
     }
+
+
 }

@@ -21,6 +21,7 @@ public class WebConfig implements WebMvcConfigurer {
                 .addPathPatterns("/**")//拦截所有请求
                 .excludePathPatterns(//放行登录接口
                         "/login",
+                        "/register",
                         "doc.html",
                         "/webjars/**",
                         "/swagger-resources/**",
