@@ -2,7 +2,7 @@ package com.agent.controller;
 
 import com.agent.entity.Result;
 import com.agent.entity.User;
-import com.agent.entity.UserAuthDTO;
+import com.agent.entity.dto.UserAuthDTO;
 import com.agent.entity.UserInfo;
 import com.agent.mapper.LoginMapper;
 import com.agent.utils.JwtUtils;

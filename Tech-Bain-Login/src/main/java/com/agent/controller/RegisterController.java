@@ -2,7 +2,7 @@ package com.agent.controller;
 
 import com.agent.entity.Result;
 import com.agent.entity.User;
-import com.agent.entity.UserAuthDTO;
+import com.agent.entity.dto.UserAuthDTO;
 import com.agent.mapper.RegisterMapper;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import io.swagger.v3.oas.annotations.Operation;
@@ -15,6 +15,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.time.LocalDateTime;
 
 @Slf4j
 @Tag(name = "注册接口")
@@ -43,6 +45,8 @@ public class RegisterController {
         User user = new User();
         user.setUsername(dto.getUsername());
         user.setPassword(hashPassword);
+        user.setCreateTime(LocalDateTime.now());
+        user.setUpdateTime(LocalDateTime.now());
         int rows = registerMapper.insert(user);
         return rows > 0 ? Result.success("注册成功") : Result.error(HttpServletResponse.SC_BAD_REQUEST,"注册失败");
     }

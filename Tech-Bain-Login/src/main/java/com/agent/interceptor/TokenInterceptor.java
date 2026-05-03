@@ -15,6 +15,11 @@ public class TokenInterceptor implements HandlerInterceptor {
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
+        //遇到浏览器的 OPTIONS 预检请求，直接放行！
+        if ("OPTIONS".equals(request.getMethod())) {
+            return true;
+        }
+
         // 1. 获取请求头中的token
         String token = request.getHeader("token");
         log.info("获取请求头中的token：{}", token);

@@ -2,10 +2,8 @@ package com.agent.controller;
 
 import com.agent.AgentService;
 import com.agent.aopanno.Log;
-import com.agent.entity.Article;
-import com.agent.entity.ArticleSaveDTO;
+import com.agent.entity.dto.ArticleSaveDTO;
 import com.agent.entity.Result;
-import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.embedding.EmbeddingModel;

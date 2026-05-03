@@ -17,6 +17,8 @@ public class User {
     private String username;
     private String name;
     private String password;
+    private String age;
+    private Integer gender;//1为男，2为女
     private String email;
     private String phone;// 电话号码
     private String avatar;//头像

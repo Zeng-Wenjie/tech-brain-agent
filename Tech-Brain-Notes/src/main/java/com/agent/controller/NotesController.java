@@ -2,7 +2,7 @@ package com.agent.controller;
 
 import com.agent.aopanno.Log;
 import com.agent.entity.Article;
-import com.agent.entity.PageDTO;
+import com.agent.entity.dto.PageDTO;
 import com.agent.entity.PageQuery;
 import com.agent.entity.Result;
 import com.agent.mapper.NotesMapper;

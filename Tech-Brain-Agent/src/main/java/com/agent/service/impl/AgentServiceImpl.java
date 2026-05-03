@@ -2,7 +2,7 @@ package com.agent.service.impl;
 import com.agent.AgentService;
 import com.agent.constant.GenerateContant;
 import com.agent.entity.Article;
-import com.agent.entity.ArticleSaveDTO;
+import com.agent.entity.dto.ArticleSaveDTO;
 import com.agent.mapper.AgentMapper;
 import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
