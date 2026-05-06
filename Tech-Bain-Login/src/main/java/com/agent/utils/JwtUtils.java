@@ -14,7 +14,7 @@ import java.util.Map;
 @Component
 public class JwtUtils {
     //声明一个密钥
-    private static final String SECRET_KEY = "TechBrainAgentTechBrainAgentTechBrainAgent";
+    private static final String SECRET_KEY = System.getenv("JWT_SECRET_KEY");
     //创建一个符合 HMAC-SHA 算法要求的 Key 对象
     private static final Key KEY = Keys.hmacShaKeyFor(SECRET_KEY.getBytes());
     //密钥有效期,默认7天

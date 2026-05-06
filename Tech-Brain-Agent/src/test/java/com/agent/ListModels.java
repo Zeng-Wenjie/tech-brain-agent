@@ -10,7 +10,8 @@ import java.net.Proxy;
 public class ListModels {
     public static void main(String[] args) throws Exception {
         Proxy proxy = new Proxy(Proxy.Type.HTTP, new InetSocketAddress("127.0.0.1", 9674));
-        URL url = new URL("https://generativelanguage.googleapis.com/v1beta/models?key=AIzaSyAn67JDZGIEEUxEkNc5QpueZNQzOnlSa1g");
+        String apiKey = System.getenv("GEMINI_API_KEY");
+        URL url = new URL("https://generativelanguage.googleapis.com/v1beta/models?key=" + apiKey);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection(proxy);
         conn.setRequestMethod("GET");
         

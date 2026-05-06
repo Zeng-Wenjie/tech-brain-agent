@@ -34,10 +34,8 @@ public class AgentController {
     private EmbeddingStore<TextSegment> embeddingStore;//注入Redis向量库
 
     // 用 LangChain4j 的写法！
-    GoogleAiGeminiChatModel model = GoogleAiGeminiChatModel.builder()
-            .apiKey("AIzaSyAn67JDZGIEEUxEkNc5QpueZNQzOnlSa1g")//API Key
-            .modelName("gemini-3-flash-preview")//模型名称
-            .build();//创建模型
+    @Autowired
+    private GoogleAiGeminiChatModel model;
 
     @Operation(summary = "智能 RAG 对话接口")
     @GetMapping("/chat")
@@ -90,5 +88,4 @@ public class AgentController {
 
         return Result.success("笔记已成功存入数据库");
     }
-
 }

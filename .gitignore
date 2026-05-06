@@ -15,3 +15,14 @@ target/
 .project
 .settings/
 .classpath
+.env
+.env.*
+!.env.example
+*.local
+application-local.yml
+application-local.yaml
+application-*.local.yml
+application-*.local.yaml
+
+docker/redis/data/
+*.rdb

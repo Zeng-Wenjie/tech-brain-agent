@@ -1,0 +1,11 @@
+services:
+  redis-stack:
+    image: redis/redis-stack-server:latest
+    container_name: tech-brain-redis-stack
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./docker/redis/data:/data
+    restart: always
+
+#启动docker compose up -d
