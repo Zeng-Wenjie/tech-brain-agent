@@ -4,14 +4,6 @@ import com.agent.AgentService;
 import com.agent.aopanno.Log;
 import com.agent.entity.dto.ArticleSaveDTO;
 import com.agent.entity.Result;
-import dev.langchain4j.data.embedding.Embedding;
-import dev.langchain4j.data.segment.TextSegment;
-import dev.langchain4j.model.embedding.EmbeddingModel;
-import dev.langchain4j.model.googleai.GoogleAiGeminiChatModel;
-import dev.langchain4j.store.embedding.EmbeddingMatch;
-import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
-import dev.langchain4j.store.embedding.EmbeddingSearchResult;
-import dev.langchain4j.store.embedding.EmbeddingStore;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletResponse;
@@ -19,54 +11,18 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.List;
-import java.util.stream.Collectors;
-
 @Tag(name = "AI 问答与笔记管理")
 @Slf4j
 @RestController
 public class AgentController {
     @Autowired
     private AgentService agentService;
-    @Autowired
-    private EmbeddingModel embeddingModel;//注入向量模型
-    @Autowired
-    private EmbeddingStore<TextSegment> embeddingStore;//注入Redis向量库
-
-    // 用 LangChain4j 的写法！
-    @Autowired
-    private GoogleAiGeminiChatModel model;
 
     @Operation(summary = "智能 RAG 对话接口")
     @GetMapping("/chat")
     public Result<String> chat(@RequestParam String msg) {
         log.info("接收到前端提问: {}", msg); // 打印请求参数//接收参数
-        //RAG编写：
-        // 将用户的提问转为向量
-        Embedding embedding = embeddingModel.embed(msg).content();
-        //构建查询参数
-        EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
-                .queryEmbedding(embedding)
-                .maxResults(3)//最大返回条数为3
-                .minScore(0.4)//最低相似度阔值为0.7
-                .build();//构建查询参数
-
-        //去Redis向量库进行相似度搜索
-        EmbeddingSearchResult<TextSegment> searchResult = embeddingStore.search(searchRequest);
-        List<EmbeddingMatch<TextSegment>> relatedEmbeddings = searchResult.matches();
-        // 确认是不是查出来为 0
-        log.info("=== 核心排查：从 Redis 中检索到的数据条数：{} ===", relatedEmbeddings.size());
-
-        String context = relatedEmbeddings.stream()
-                .map(match -> match.embedded().text())
-                .collect(Collectors.joining("\n\n"));
-
-        String prompt = "你是一个智能技术助手。请优先基于以下参考资料回答用户问题。\n" +
-                "参考资料：\n" + context + "\n\n" +
-                "如果参考资料不足以完全解答，或者可以提供更有价值的扩展技术背景，请结合你的专业知识进行适当补充。\n" +
-                "用户问题：" + msg;
-        // 发送消息并获取回复
-        String response = model.generate(prompt);
+        String response = agentService.chat(msg);
         log.info("大模型生成完毕，准备返回: {}", response);
         // 打印返回结果
         return Result.success(response);
