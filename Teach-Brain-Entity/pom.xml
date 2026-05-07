@@ -25,8 +25,8 @@
             <artifactId>lombok</artifactId>
         </dependency>
         <dependency>
-            <groupId>io.swagger.core.v3</groupId>
-            <artifactId>swagger-annotations</artifactId>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-common</artifactId>
         </dependency>
         <dependency>
             <groupId>jakarta.validation</groupId>

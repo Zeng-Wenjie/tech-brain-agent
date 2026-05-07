@@ -39,7 +39,11 @@ mybatis-plus:
       logic-delete-field:  #配置逻辑删除字段
 
 springdoc:
-  # 关闭 SpringDoc 自动扫描全局异常响应的功能，避开底层的兼容性 Bug
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
+    path: /swagger-ui.html
   override-with-generic-response: false
 
 #阿里云配置

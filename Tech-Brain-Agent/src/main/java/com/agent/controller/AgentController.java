@@ -2,23 +2,27 @@ package com.agent.controller;
 
 import com.agent.AgentService;
 import com.agent.aopanno.Log;
-import com.agent.entity.dto.ArticleSaveDTO;
 import com.agent.entity.Result;
+import com.agent.entity.dto.ArticleSaveDTO;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
 
-@Tag(name = "AI 问答与笔记管理")
+@Tag(name = "AI问答与笔记保存接口")
 @Slf4j
 @RestController
 public class AgentController {
     @Autowired
     private AgentService agentService;
 
-    @Operation(summary = "智能 RAG 对话接口")
+    @Operation(summary = "智能RAG问答")
     @GetMapping("/chat")
     public Result<String> chat(@RequestParam String msg) {
         log.info("接收到前端提问: {}", msg); // 打印请求参数//接收参数 / Log and receive the request parameter.
@@ -29,7 +33,7 @@ public class AgentController {
         return Result.success(response);
     }
 
-    @Operation(summary = "保存笔记接口")
+    @Operation(summary = "保存AI回复为笔记")
     @Log
     @PostMapping("/save-note")
     public Result<String> saveNote(@RequestBody ArticleSaveDTO dto) {

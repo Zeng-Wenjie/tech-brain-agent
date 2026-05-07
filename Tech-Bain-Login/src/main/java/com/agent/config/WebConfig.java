@@ -24,10 +24,14 @@ public class WebConfig implements WebMvcConfigurer {
                         "/register",
                         "/chat",
                         "/doc.html",
+                        "/swagger-ui.html",
+                        "/swagger-ui/**",
                         "/webjars/**",
                         "/favicon.ico",
                         "/swagger-resources/**",
-                        "/v3/api-docs/**"
+                        "/v3/api-docs",
+                        "/v3/api-docs/**",
+                        "/v3/api-docs.yaml"
                 );
     }
 }

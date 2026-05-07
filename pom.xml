@@ -46,14 +46,13 @@
         <!--各依赖版本号-->
         <lombok.version>1.18.44</lombok.version>
         <mybatis-plus.version>3.5.15</mybatis-plus.version>
-        <knife4j.version>4.5.0</knife4j.version>
+        <springdoc.version>3.0.3</springdoc.version>
         <spring-boot-starter-aop.version>3.5.13</spring-boot-starter-aop.version>
         <google-genai.version>1.0.0</google-genai.version>
         <langchain4j.version>0.36.2</langchain4j.version>
         <jjwt.version>0.11.5</jjwt.version>
         <aliyun-oss.version>3.17.4</aliyun-oss.version>
         <jbcrypt.version>0.4</jbcrypt.version>
-        <swagger-annotations.version>2.1.2</swagger-annotations.version>
         <jaxb-api.version>2.3.1</jaxb-api.version>
         <activation.version>1.1.1</activation.version>
         <jaxb-runtime.version>2.3.3</jaxb-runtime.version>
@@ -85,19 +84,19 @@
                 <version>${mybatis-plus.version}</version>
             </dependency>
             <dependency>
-                <groupId>com.github.xiaoymin</groupId>
-                <artifactId>knife4j-openapi3-jakarta-spring-boot-starter</artifactId>
-                <version>${knife4j.version}</version>
+                <groupId>org.springdoc</groupId>
+                <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+                <version>${springdoc.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springdoc</groupId>
+                <artifactId>springdoc-openapi-starter-common</artifactId>
+                <version>${springdoc.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-starter-aop</artifactId>
                 <version>${spring-boot-starter-aop.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>io.swagger.core.v3</groupId>
-                <artifactId>swagger-annotations</artifactId>
-                <version>${swagger-annotations.version}</version>
             </dependency>
             <!--GeminiAPI-->
             <dependency>

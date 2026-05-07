@@ -2,6 +2,7 @@ package com.agent.service.impl;
 
 import com.agent.entity.Result;
 import com.agent.entity.User;
+import com.agent.entity.dto.ChangePasswordDTO;
 import com.agent.entity.dto.UserInformationDTO;
 import com.agent.mapper.UserInformationMapper;
 import com.agent.service.UserInformationService;
@@ -10,6 +11,7 @@ import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
+import org.mindrot.jbcrypt.BCrypt;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.RedisTemplate;
@@ -106,5 +108,45 @@ public class UserInformationServiceImpl extends ServiceImpl<UserInformationMappe
         }
 
         return Result.success(user);
+    }
+
+    @Override
+    public Result<String> changePassword(ChangePasswordDTO dto) {
+        Long userId = UserContext.getUserId();
+        if(userId == null){
+            throw new RuntimeException("用户未登录");
+        }
+
+        User user = this.getById(userId);
+        if(user == null){
+            return Result.error( HttpServletResponse.SC_BAD_REQUEST,"用户不存在");
+        }
+        //效验旧密码是否正确
+        // Validate whether the old password is correct.
+        boolean oldPasswordMatches = BCrypt.checkpw(dto.getOldPassword(), user.getPassword());
+        if(!oldPasswordMatches){
+            return Result.error(HttpServletResponse.SC_BAD_REQUEST,"旧密码错误");
+        }
+        //新密码和旧密码不能一样
+        //The New password cannot be the same as the old password.
+        boolean sameAsOldPassword = BCrypt.checkpw(dto.getNewPassword(), user.getPassword());
+        if(sameAsOldPassword){
+            return Result.error(HttpServletResponse.SC_BAD_REQUEST,"新密码和旧密码不能一样");
+        }
+        //加新密码
+       String newHashPassword = BCrypt.hashpw(dto.getNewPassword(),BCrypt.gensalt());
+        User updateUser = new User();
+        updateUser.setId(userId);
+        updateUser.setPassword(newHashPassword);
+        boolean success = this.updateById(updateUser);
+        if(!success){
+            return Result.error(HttpServletResponse.SC_BAD_REQUEST,"密码修改失败");
+        }
+        //删除Redis缓存
+        // Delete the user information cache.
+        String redisKey = "user:info:" + userId;
+        redisTemplate.delete(redisKey);
+
+        return Result.success("密码修改成功");
     }
 }

@@ -1,8 +1,8 @@
 package com.agent.controller;
 
-import com.agent.service.RegisterService;
 import com.agent.entity.Result;
 import com.agent.entity.dto.UserAuthDTO;
+import com.agent.service.RegisterService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -19,10 +19,10 @@ public class RegisterController {
     @Autowired
     private RegisterService registerService;
 
-    @Operation(summary = "注册接口")
+    @Operation(summary = "用户注册")
     @PostMapping("/register")
     public Result<String> register(@RequestBody @Valid UserAuthDTO dto) {
-        log.info("用户注册,用户名：{}",dto.getUsername());
+        log.info("用户注册,用户名：{}", dto.getUsername());
         return registerService.register(dto);
     }
 }
