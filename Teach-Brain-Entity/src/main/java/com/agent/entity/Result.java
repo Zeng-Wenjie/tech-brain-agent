@@ -4,13 +4,14 @@ import lombok.Data;
 
 @Data
 public class Result<T> {
-    private Integer code;//状态码
-    private String message;//提示信息
-    private T data;// 数据
+    private Integer code;//状态码 / Status code.
+    private String message;//提示信息 / Message.
+    private T data;// 数据 / Data payload.
 
     private Result(){}
 
-    //成功
+        //成功
+        // Success.
     public static <T> Result<T> success(T data){
         Result<T> result = new Result<>();
         result.setCode(200);
@@ -19,7 +20,8 @@ public class Result<T> {
         return result;
     }
 
-    //失败
+        //失败
+        // Failure.
     public static <T> Result<T> error(Integer code,String message){
         Result<T> result = new Result<>();
         result.setCode(code);

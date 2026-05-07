@@ -8,10 +8,10 @@ import lombok.Data;
 public class PageQuery {
 
     @Schema(description = "当前页码", defaultValue = "1")
-    private Integer pageNo = 1; // 给个默认值 1
+    private Integer pageNo = 1; // 给个默认值 1 / Default to page 1.
 
     @Schema(description = "每页数量", defaultValue = "9")
-    private Integer pageSize = 9; // 配合你前端的九宫格，默认给 9
+    private Integer pageSize = 9; // 配合你前端的九宫格，默认给 9 / Default to 9 for the frontend grid layout.
 
     @Schema(description = "排序字段")
     private String sortBy;
@@ -20,6 +20,8 @@ public class PageQuery {
     private Boolean isAsc;
 
     // 💡 以后你想加搜索功能，直接往这里面塞字段就行，比如：
+    // Add future search fields here when needed, for example:
     // @Schema(description = "笔记标题搜索关键字")
+    // @Schema(description = "Note title search keyword")
     // private String title;
 }

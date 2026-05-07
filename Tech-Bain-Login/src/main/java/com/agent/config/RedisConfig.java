@@ -19,11 +19,13 @@ public class RedisConfig {
         template.setConnectionFactory(connectionFactory);
 
         //使用String序列化方式，序列化KEY
+        // Serialize keys as strings.
         StringRedisSerializer stringRedisSerializer = new StringRedisSerializer();
         template.setKeySerializer(stringRedisSerializer);
         template.setHashKeySerializer(stringRedisSerializer);
 
         //使用Json序列化方式，序列化VALUE
+        // Serialize values as JSON.
         RedisSerializer<Object> jsonSerializer = RedisSerializer.json();
         template.setValueSerializer(jsonSerializer);
         template.setHashValueSerializer(jsonSerializer);

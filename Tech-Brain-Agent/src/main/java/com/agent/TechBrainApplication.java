@@ -6,7 +6,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 
 @SpringBootApplication
-@MapperScan("com.agent.mapper")//扫描mapper接口
+@MapperScan("com.agent.mapper")//扫描mapper接口 / Scan mapper interfaces.
 public class TechBrainApplication {
 
     public static void main(String[] args) {

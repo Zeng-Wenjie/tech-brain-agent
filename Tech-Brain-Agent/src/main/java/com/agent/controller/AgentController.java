@@ -21,10 +21,11 @@ public class AgentController {
     @Operation(summary = "智能 RAG 对话接口")
     @GetMapping("/chat")
     public Result<String> chat(@RequestParam String msg) {
-        log.info("接收到前端提问: {}", msg); // 打印请求参数//接收参数
+        log.info("接收到前端提问: {}", msg); // 打印请求参数//接收参数 / Log and receive the request parameter.
         String response = agentService.chat(msg);
         log.info("大模型生成完毕，准备返回: {}", response);
         // 打印返回结果
+        // Log the response result.
         return Result.success(response);
     }
 
@@ -33,6 +34,7 @@ public class AgentController {
     @PostMapping("/save-note")
     public Result<String> saveNote(@RequestBody ArticleSaveDTO dto) {
         // 基础参数校验
+        // Basic parameter validation.
         if (dto.getTitle() == null || dto.getTitle().trim().isEmpty()) {
             return Result.error(HttpServletResponse.SC_BAD_REQUEST, "笔记标题不能为空");
         }
@@ -40,6 +42,7 @@ public class AgentController {
             return Result.error(HttpServletResponse.SC_BAD_REQUEST, "笔记内容不能为空");
         }
         // 执行入库
+        // Persist the note.
         agentService.saveAiNote(dto);
 
         return Result.success("笔记已成功存入数据库");

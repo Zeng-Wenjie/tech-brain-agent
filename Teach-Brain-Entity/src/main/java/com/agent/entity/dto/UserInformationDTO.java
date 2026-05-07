@@ -8,7 +8,7 @@ import lombok.Data;
 public class UserInformationDTO {
     private String name;
     private String age;
-    private Integer gender;//1为男，2为女
+    private Integer gender;//1为男，2为女 / 1 for male, 2 for female.
     private String email;
     private String phone;
 }

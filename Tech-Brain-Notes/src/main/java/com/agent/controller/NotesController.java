@@ -21,6 +21,7 @@ public class NotesController {
     private NotesService notesService;
 
     //分页查询操作
+    // Paginated query.
     @Operation(summary = "根据用户ID分页查询笔记")
     @GetMapping("/page")
     public Result<PageDTO<Article>> page(PageQuery pageQuery) {
@@ -28,6 +29,7 @@ public class NotesController {
     }
 
 //单删
+// Delete a single article.
     @Log
     @DeleteMapping("/{id}")
     public Result deleteArticle(@PathVariable Long id) {
@@ -37,6 +39,7 @@ public class NotesController {
     }
 
     //批量删除
+    // Delete articles in batch.
     @Operation(summary = "批量删除")
     @DeleteMapping("/batch")
     public Result deleteArticle(@RequestBody List<Long> ids) {

@@ -25,6 +25,7 @@ public class RegisterServiceImpl extends ServiceImpl<RegisterMapper, User> imple
     @Override
     public Result<String> register(UserAuthDTO dto) {
         //判断用户名是否已存在
+        // Check whether the username already exists.
         Long  count = registerMapper.selectCount(new LambdaQueryWrapper<User>()
                 .eq(User::getUsername, dto.getUsername()));
         if (count > 0) {
@@ -33,9 +34,11 @@ public class RegisterServiceImpl extends ServiceImpl<RegisterMapper, User> imple
         }
 
         //密码加密
+        // Encrypt the password.
         String hashPassword = BCrypt.hashpw(dto.getPassword(), BCrypt.gensalt());
 
         //插入用户
+        // Insert the user.
         User user = new User();
         user.setUsername(dto.getUsername());
         user.setPassword(hashPassword);

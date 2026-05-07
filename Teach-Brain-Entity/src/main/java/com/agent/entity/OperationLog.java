@@ -8,6 +8,7 @@ import lombok.Data;
 import java.time.LocalDateTime;
 /**
  * 操作日志
+ * Operation log.
  */
 @Data
 @TableName("operate_log")

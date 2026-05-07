@@ -6,6 +6,7 @@ import org.apache.ibatis.annotations.Mapper;
 
 /*
  * 操作日志
+ * Operation log mapper.
  */
 @Mapper
 public interface OperationLohMapper extends BaseMapper<OperationLog> {

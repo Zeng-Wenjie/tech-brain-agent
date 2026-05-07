@@ -25,6 +25,7 @@ public class LoginServiceImpl extends ServiceImpl<LoginMapper, User> implements 
     @Override
     public Result<UserInfo> login(UserAuthDTO dto) {
         // 根据用户名查询用户
+        // Query the user by username.
         User loginUser = loginMapper.selectOne(new LambdaQueryWrapper<User>()
                 .eq(User::getUsername, dto.getUsername()));
         if (loginUser == null) {
@@ -32,6 +33,7 @@ public class LoginServiceImpl extends ServiceImpl<LoginMapper, User> implements 
         }
 
         //密码校验，调用BCrypt.checkpw方法
+        // Validate the password with BCrypt.checkpw.
         boolean isPasswordMath = BCrypt.checkpw(dto.getPassword(), loginUser.getPassword());
         if (!isPasswordMath) {
             return Result.error(HttpServletResponse.SC_BAD_REQUEST,"用户名或密码错误");
@@ -39,8 +41,10 @@ public class LoginServiceImpl extends ServiceImpl<LoginMapper, User> implements 
 
         log.info("账号密码正确：{}", loginUser);
         // 生成Token
+        // Generate the token.
         String token = JwtUtils.createToken(loginUser.getId(), loginUser.getUsername());
         //把用户信息和Token封装到UserInfo对象中并放回前端
+        // Wrap the user information and token in UserInfo for the frontend.
         UserInfo userInfo = new UserInfo();
         userInfo.setId(loginUser.getId());
         userInfo.setUsername(loginUser.getUsername());

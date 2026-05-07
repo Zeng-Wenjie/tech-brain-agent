@@ -29,21 +29,23 @@ public class UserInformationServiceImpl extends ServiceImpl<UserInformationMappe
 
     @Override
     public Result<String> userInformation(UserInformationDTO dto) {
-        Long userId = UserContext.getUserId();// 获取用户id
+        Long userId = UserContext.getUserId();// 获取用户id / Get the user ID.
         if(userId != null){
             User user = new User();
             BeanUtils.copyProperties(dto,user);
             user.setId(userId);
             String redisKey = "user:info:" + userId;
             //先删Redis旧缓存
+            // Delete the old Redis cache first.
             redisTemplate.delete(redisKey);
-            boolean success = this.updateById(user);//同步更新
+            boolean success = this.updateById(user);//同步更新 / Update synchronously.
             //更新成功，异步延迟双删
+            // After a successful update, perform asynchronous delayed double deletion.
             if ( success){
                 CompletableFuture.runAsync(() -> {
                     try {
-                        Thread.sleep(500);//延迟500毫秒
-                        redisTemplate.delete(redisKey);//再次删除
+                        Thread.sleep(500);//延迟500毫秒 / Delay for 500 milliseconds.
+                        redisTemplate.delete(redisKey);//再次删除 / Delete the cache again.
                         log.info("异步删除用户信息成功,KEY: {}",redisKey);
                     }catch (InterruptedException e){
                         log.error("异步删除用户信息失败",e);
@@ -59,11 +61,11 @@ public class UserInformationServiceImpl extends ServiceImpl<UserInformationMappe
     public Result<String> uploadAvatar(MultipartFile file) {
         try {
             String url = aliOssUtil.upload(file.getBytes(),file.getOriginalFilename());
-            Long userId = UserContext.getUserId(); // 从 ThreadLocal/拦截器 获取当前用户ID
+            Long userId = UserContext.getUserId(); // 从 ThreadLocal/拦截器 获取当前用户ID / Get the current user ID from ThreadLocal or the interceptor.
             if (userId != null) {
                 User user = new User();
-                user.setId(userId);      // 指定主键
-                user.setAvatar(url);     // 设置要更新的头像字段
+                user.setId(userId);      // 指定主键 / Set the primary key.
+                user.setAvatar(url);     // 设置要更新的头像字段 / Set the avatar field to update.
                 this.updateById(user);
             }
             return Result.success(url);
@@ -76,6 +78,7 @@ public class UserInformationServiceImpl extends ServiceImpl<UserInformationMappe
     @Override
     public Result<User> getCurrentUserInfo() {
         // 从当前线程上下文获取已登录用户的 ID
+        // Get the logged-in user ID from the current thread context.
         Long userId = UserContext.getUserId();
 
         if (userId == null) {
@@ -84,16 +87,19 @@ public class UserInformationServiceImpl extends ServiceImpl<UserInformationMappe
 
         String redisKey = "user:info:" + userId;
         // 尝试从 Redis 中获取用户信息
+        // Try to read the user information from Redis.
         User user = (User) redisTemplate.opsForValue().get(redisKey);
         if (user != null) {
             log.info("命中Redis缓存！用户ID: {}", userId);
             return Result.success(user);
         }
         //Redis未命中，从数据库中获取用户信息
+        // If Redis misses, load the user information from the database.
         log.info("未命中Redis缓存！用户ID: {}", userId);
         user = this.getById(userId);
 
         // 把密码擦除再返回给前端
+        // Clear the password before returning the user to the frontend.
         if (user != null) {
             user.setPassword(null);
             redisTemplate.opsForValue().set(redisKey, user,2, TimeUnit.HOURS);
