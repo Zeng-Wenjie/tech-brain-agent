@@ -1,6 +1,5 @@
-package com.agent.entity;
+package com.agent.config;
 
-import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
@@ -8,7 +7,7 @@ import org.springframework.stereotype.Component;
 @Data
 @Component
 @ConfigurationProperties(prefix = "aliyun.oss")
-public class AliOss {
+public class AliOssProperties {
     private String endpoint;
     private String bucketName;
     private String region;

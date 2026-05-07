@@ -26,6 +26,12 @@
             <artifactId>Teach-Brain-Entity</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <!--公共模块-->
+        <dependency>
+            <groupId>com.agent</groupId>
+            <artifactId>Tech-Brain-Common</artifactId>
+            <version>${project.version}</version>
+        </dependency>
         <!--AOP模块-->
         <dependency>
         <groupId>com.agent</groupId>
@@ -39,12 +45,6 @@
             <version>${project.version}</version>
         </dependency>
         <!--Login模块-->
-        <dependency>
-            <groupId>com.agent</groupId>
-            <artifactId>Tech-Bain-Login</artifactId>
-            <version>${project.version}</version>
-        </dependency>
-
         <dependency>
             <groupId>com.agent</groupId>
             <artifactId>Tech-Bain-Login</artifactId>

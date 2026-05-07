@@ -1,6 +1,6 @@
 package com.agent.utils;
 
-import com.agent.entity.AliOss;
+import com.agent.config.AliOssProperties;
 import com.aliyun.oss.ClientBuilderConfiguration;
 import com.aliyun.oss.OSS;
 import com.aliyun.oss.OSSClientBuilder;
@@ -18,7 +18,7 @@ import java.util.UUID;
 @Component
 public class AliOssUtil {
     @Autowired
-    private AliOss aliOss;
+    private AliOssProperties aliOss;
 
     public String upload(byte[] content, String originalFilename) throws Exception {
 
@@ -54,4 +54,3 @@ public class AliOssUtil {
         return endpoint.split("//")[0] + "//" + bucketName + "." + endpoint.split("//")[1] + "/" + objectName;
     }
 }
-

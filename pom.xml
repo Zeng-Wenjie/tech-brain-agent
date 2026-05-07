@@ -28,6 +28,7 @@
     <modules>
         <module>Tech-Brain-Agent</module>
         <module>Teach-Brain-Entity</module>
+        <module>Tech-Brain-Common</module>
         <module>Tech-Brain-Notes</module>
         <module>Tech-Brain-AOP</module>
         <module>Tech-Bain-Login</module>
