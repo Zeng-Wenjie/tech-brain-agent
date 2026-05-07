@@ -24,4 +24,8 @@ public class MyMetaObjectHandler implements MetaObjectHandler {
         // 更新（修改个人信息）时，自动给 updateTime 赋值当前时间
         this.strictUpdateFill(metaObject, "updateTime", LocalDateTime.class, LocalDateTime.now());
     }
+
+
+
+
 }
