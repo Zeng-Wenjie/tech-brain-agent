@@ -10,6 +10,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -50,5 +51,11 @@ public class AgentController {
         agentService.saveAiNote(dto);
 
         return Result.success("笔记已成功存入数据库");
+    }
+    @Operation(summary = "AI总结指定笔记")
+    @PostMapping("/article/ai/summary/{id}")
+    public Result<String> summarizeArticle(@PathVariable("id") Long articleId) {
+        String summary = agentService.summarizeArticle(articleId);
+        return Result.success(summary);
     }
 }

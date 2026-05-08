@@ -9,4 +9,6 @@ public interface AgentService extends IService<Article> {
     String chat(String msg);
 
     void saveAiNote(ArticleSaveDTO dto);
+
+    String summarizeArticle(Long articleId);
 }

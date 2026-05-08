@@ -5,6 +5,7 @@ import com.agent.entity.Article;
 import com.agent.entity.dto.ArticleSaveDTO;
 import com.agent.mapper.AgentMapper;
 import com.agent.utils.UserContext;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
@@ -111,5 +112,38 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
 
 
         log.info("保存笔记成功:{}",article);
+    }
+    @Override
+    public String summarizeArticle(Long articleId) {
+        Long currentUserId = UserContext.getUserId();
+        Article article = articleMapper.selectOne(new LambdaQueryWrapper<Article>()
+                .eq(Article::getId, articleId)
+                .eq(Article::getUserId, currentUserId));
+
+        if (article == null) {
+            throw new RuntimeException("笔记不存在或无权限访问");
+        }
+
+        String prompt = """
+        你是一个技术笔记总结助手。
+
+        请根据下面的笔记内容生成总结。
+
+        要求：
+        1. 使用中文。
+        2. 返回纯文本。
+        3. 不要使用 Markdown。
+        4. 不要出现 ```、##、**、\\n 等格式符号。
+        5. 先用一句话总结主题。
+        6. 再列出 3-5 个核心要点。
+
+        笔记标题：
+        %s
+
+        笔记内容：
+        %s
+        """.formatted(article.getTitle(), article.getContent());
+
+        return model.generate(prompt);
     }
 }
