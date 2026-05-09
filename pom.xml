@@ -115,10 +115,10 @@
                 <artifactId>langchain4j-google-ai-gemini</artifactId>
                 <version>${langchain4j.version}</version>
             </dependency>
-            <!--LangChain4j 的 Redis 依赖-->
+            <!--LangChain4j Milvus vector store-->
             <dependency>
                 <groupId>dev.langchain4j</groupId>
-                <artifactId>langchain4j-redis</artifactId>
+                <artifactId>langchain4j-milvus</artifactId>
                 <version>${langchain4j.version}</version>
             </dependency>
             <!--向量模型依赖-->

@@ -96,10 +96,10 @@
             <groupId>dev.langchain4j</groupId>
             <artifactId>langchain4j-google-ai-gemini</artifactId>
         </dependency>
-    <!--LangChain4j 的 Redis 依赖-->
+        <!--LangChain4j Milvus vector store-->
         <dependency>
             <groupId>dev.langchain4j</groupId>
-            <artifactId>langchain4j-redis</artifactId>
+            <artifactId>langchain4j-milvus</artifactId>
         </dependency>
         <!--向量模型依赖-->
         <dependency>
@@ -111,7 +111,6 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
-
     </dependencies>
 <!--在阿里云仓库调用-->
     <repositories>

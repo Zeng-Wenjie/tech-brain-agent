@@ -16,6 +16,7 @@ import dev.langchain4j.store.embedding.EmbeddingMatch;
 import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
 import dev.langchain4j.store.embedding.EmbeddingSearchResult;
 import dev.langchain4j.store.embedding.EmbeddingStore;
+import dev.langchain4j.store.embedding.filter.MetadataFilterBuilder;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -36,7 +37,7 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
     @Autowired
     private EmbeddingModel embeddingModel;//注入向量模型 / Inject the embedding model.
     @Autowired
-    private EmbeddingStore<TextSegment> embeddingStore;//注入Redis向量库 / Inject the Redis vector store.
+    private EmbeddingStore<TextSegment> embeddingStore;
     @Autowired
     private GoogleAiGeminiChatModel model;
     @Autowired
@@ -44,29 +45,22 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
 
     @Override
     public String chat(String msg) {
-        //RAG编写：
-        // RAG workflow.
-        // 将用户的提问转为向量
-        // Convert the user's question into an embedding.
+        Long currentUserId = UserContext.getUserId();
         Embedding embedding = embeddingModel.embed(msg).content();
-        //构建查询参数
-        // Build the search request.
+
         EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
                 .queryEmbedding(embedding)
-                .maxResults(3)//最大返回条数为3 / Return at most 3 matches.
-                .minScore(0.7)//最低相似度阔值为0.7 / Minimum similarity threshold.
-                .build();//构建查询参数 / Build the search request.
+                .maxResults(3)
+                .minScore(0.7)
+                .filter(MetadataFilterBuilder.metadataKey("userId").isEqualTo(String.valueOf(currentUserId)))
+                .build();
 
-        //去Redis向量库进行相似度搜索
-        // Search the Redis vector store by similarity.
         EmbeddingSearchResult<TextSegment> searchResult = embeddingStore.search(searchRequest);
         List<EmbeddingMatch<TextSegment>> relatedEmbeddings = searchResult.matches();
-        // 确认是不是查出来为 0
-        // Confirm whether the search returned zero results.
-        log.info("=== 核心排查：从 Redis 中检索到的数据条数：{} ===", relatedEmbeddings.size());
+        log.info("Milvus article_vector search hits={}, userId={}", relatedEmbeddings.size(), currentUserId);
 
         String context = relatedEmbeddings.stream()
-                .map(match -> match.embedded().text())
+                .map(match -> buildContext(match.embedded()))
                 .collect(Collectors.joining("\n\n"));
 
         String prompt = "你是一个智能技术助手。请优先基于以下参考资料回答用户问题。\n" +
@@ -78,20 +72,24 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
         return model.generate(prompt);
     }
 
+    private String buildContext(TextSegment segment) {
+        String title = segment.metadata().getString("title");
+        String content = segment.metadata().getString("content");
+        if (content != null && !content.isBlank()) {
+            return ((title != null && !title.isBlank()) ? title + "\n" : "") + content;
+        }
+        return segment.text();
+    }
+
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
+    @Transactional(rollbackFor = Exception.class) // 先保证MySQL保存处于事务内，向量同步由监听器在提交后执行。
     public void saveAiNote(ArticleSaveDTO dto) {
         // 保存笔记
         // Save the note.
         Article article= new Article();
-//        article.setTitle(dto.getTitle());
-//        article.setContent(dto.getContent());
-//        article.setTags(dto.getTags());
 
         BeanUtils.copyProperties(dto,article);//拷贝属性 / Copy properties.
-        //根据用户ID新增
-        // Create the record for the current user.
         //在ThreadLocal 中获取当前用户ID
         // Get the current user ID from ThreadLocal.
         Long currentUserId = UserContext.getUserId();
@@ -102,17 +100,11 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
         article.setSourceType(GenerateContant.ARTICLE_SOURCE_TYPE_AI);
         article.setCreateTime(LocalDateTime.now());
         article.setUpdateTime(LocalDateTime.now());
-        article.setVectorStatus(0);
+        article.setVectorStatus(0); // 先标记为未同步，MySQL保存成功后再通过事件同步Milvus向量库。
         articleMapper.insert(article);
 
-        // 将前端传来的 AI 回答内容转化为文本片段
-        // Convert the AI answer from the frontend into a text segment.
-         //调用BGE模型，提取512个维度的向量
-         // Use the BGE model to extract a 512-dimensional embedding.
-         //存入Redis向量空间
-         // Store the embedding in the Redis vector space.
-        eventPublisher.publishEvent(new ArticleVectorSyncEvent(
-                ArticleVectorSyncEvent.EventType.UPSERT,
+        eventPublisher.publishEvent(new ArticleVectorSyncEvent( // 只发布同步事件，不在保存笔记的主流程里直接操作Redis。
+                ArticleVectorSyncEvent.EventType.UPSERT, // 新增和更新都按UPSERT处理，最终重建同一个固定向量。
                 article,
                 null));
 
@@ -124,7 +116,7 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
         Long currentUserId = UserContext.getUserId();
         Article article = articleMapper.selectOne(new LambdaQueryWrapper<Article>()
                 .eq(Article::getId, articleId)
-                .eq(Article::getUserId, currentUserId));
+                .eq(Article::getUserId, currentUserId)); // 只查当前登录用户自己的笔记，避免越权总结别人的内容。
 
         if (article == null) {
             throw new RuntimeException("笔记不存在或无权限访问");

@@ -62,7 +62,7 @@ public class NotesServiceImpl extends ServiceImpl<NotesMapper, Article> implemen
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
+    @Transactional(rollbackFor = Exception.class) // 事件在事务内发布，真正同步由AFTER_COMMIT监听器在提交后执行。
     public void deleteArticleById(Long id) {
         //在ThreadLocal 中获取当前用户ID
         // Get the current user ID from ThreadLocal.
@@ -71,7 +71,7 @@ public class NotesServiceImpl extends ServiceImpl<NotesMapper, Article> implemen
         wrapper.in(Article::getId,id).eq(Article::getUserId,currentUserId);
         int deleted = articleMapper.delete(wrapper);
         if (deleted > 0) {
-            eventPublisher.publishEvent(new ArticleVectorSyncEvent(
+            eventPublisher.publishEvent(new ArticleVectorSyncEvent( // MySQL删除成功后再发事件，清理Redis向量避免RAG命中已删除笔记。
                     ArticleVectorSyncEvent.EventType.DELETE,
                     null,
                     List.of(id)));
@@ -79,7 +79,7 @@ public class NotesServiceImpl extends ServiceImpl<NotesMapper, Article> implemen
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
+    @Transactional(rollbackFor = Exception.class) // 批量删除和事件发布处于同一事务，回滚时不会触发向量清理。
     public void deleteArticleBatch(List<Long> ids) {
         if (ids == null || ids.isEmpty()) {
             return;
@@ -96,14 +96,14 @@ public class NotesServiceImpl extends ServiceImpl<NotesMapper, Article> implemen
             return;
         }
         articleMapper.delete(wrapper);
-        eventPublisher.publishEvent(new ArticleVectorSyncEvent(
+        eventPublisher.publishEvent(new ArticleVectorSyncEvent( // 批量删除MySQL笔记后，批量清理Redis中的对应向量数据。
                 ArticleVectorSyncEvent.EventType.BATCH_DELETE,
                 null,
                 articleIds));
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
+    @Transactional(rollbackFor = Exception.class) // 修改成功提交后再同步向量，避免MySQL回滚但Redis已更新。
     public Article updateArticle(Article article) {
         int updated = articleMapper.updateById(article);
         if (updated <= 0) {
@@ -115,8 +115,8 @@ public class NotesServiceImpl extends ServiceImpl<NotesMapper, Article> implemen
                 .set(Article::getVectorStatus, 0)
                 .set(Article::getVectorError, null));
 
-        Article latestArticle = articleMapper.selectById(article.getId());
-        eventPublisher.publishEvent(new ArticleVectorSyncEvent(
+        Article latestArticle = articleMapper.selectById(article.getId()); // 读取数据库最新内容，用于重建Redis向量。
+        eventPublisher.publishEvent(new ArticleVectorSyncEvent( // 修改后重建向量，避免RAG继续检索到旧内容。
                 ArticleVectorSyncEvent.EventType.UPSERT,
                 latestArticle,
                 null));

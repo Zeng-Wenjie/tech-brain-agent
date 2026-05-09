@@ -55,3 +55,9 @@ aliyun:
 
 gemini:
   api-key: ${GEMINI_API_KEY}
+
+milvus:
+  host: localhost
+  port: 19530
+  collection-name: article_vector
+  dimension: 512

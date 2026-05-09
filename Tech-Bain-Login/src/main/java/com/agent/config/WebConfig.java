@@ -22,8 +22,6 @@ public class WebConfig implements WebMvcConfigurer {
                 .excludePathPatterns(//放行登录接口 / Exclude login-related endpoints.
                         "/login",
                         "/register",
-                        "/chat",
-                        "/doc.html",
                         "/swagger-ui.html",
                         "/swagger-ui/**",
                         "/webjars/**",
