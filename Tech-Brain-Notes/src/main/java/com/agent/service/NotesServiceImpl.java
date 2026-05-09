@@ -3,15 +3,20 @@ import com.agent.NotesService;
 import com.agent.entity.Article;
 import com.agent.entity.PageQuery;
 import com.agent.entity.dto.PageDTO;
+import com.agent.event.ArticleVectorSyncEvent;
 import com.agent.mapper.NotesMapper;
 import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.stream.Collectors;
 
 
 @Service
@@ -19,6 +24,8 @@ public class NotesServiceImpl extends ServiceImpl<NotesMapper, Article> implemen
 
     @Autowired
     private NotesMapper articleMapper;
+    @Autowired
+    private ApplicationEventPublisher eventPublisher;
 
     @Override
     public PageDTO<Article> page(PageQuery pageQuery) {
@@ -55,29 +62,65 @@ public class NotesServiceImpl extends ServiceImpl<NotesMapper, Article> implemen
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void deleteArticleById(Long id) {
         //在ThreadLocal 中获取当前用户ID
         // Get the current user ID from ThreadLocal.
         Long currentUserId = UserContext.getUserId();
         LambdaQueryWrapper<Article> wrapper = new LambdaQueryWrapper<>();
         wrapper.in(Article::getId,id).eq(Article::getUserId,currentUserId);
-        articleMapper.delete(wrapper);
+        int deleted = articleMapper.delete(wrapper);
+        if (deleted > 0) {
+            eventPublisher.publishEvent(new ArticleVectorSyncEvent(
+                    ArticleVectorSyncEvent.EventType.DELETE,
+                    null,
+                    List.of(id)));
+        }
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void deleteArticleBatch(List<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return;
+        }
         //在ThreadLocal 中获取当前用户ID
         // Get the current user ID from ThreadLocal.
         Long currentUserId = UserContext.getUserId();
         LambdaQueryWrapper<Article> wrapper = new LambdaQueryWrapper<>();
         wrapper.in(Article::getId,ids).eq(Article::getUserId,currentUserId);
+        List<Long> articleIds = articleMapper.selectList(wrapper).stream()
+                .map(Article::getId)
+                .collect(Collectors.toList());
+        if (articleIds.isEmpty()) {
+            return;
+        }
         articleMapper.delete(wrapper);
+        eventPublisher.publishEvent(new ArticleVectorSyncEvent(
+                ArticleVectorSyncEvent.EventType.BATCH_DELETE,
+                null,
+                articleIds));
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public Article updateArticle(Article article) {
-        articleMapper.updateById(article);
-        return article;
+        int updated = articleMapper.updateById(article);
+        if (updated <= 0) {
+            return article;
+        }
+
+        articleMapper.update(null, new LambdaUpdateWrapper<Article>()
+                .eq(Article::getId, article.getId())
+                .set(Article::getVectorStatus, 0)
+                .set(Article::getVectorError, null));
+
+        Article latestArticle = articleMapper.selectById(article.getId());
+        eventPublisher.publishEvent(new ArticleVectorSyncEvent(
+                ArticleVectorSyncEvent.EventType.UPSERT,
+                latestArticle,
+                null));
+        return latestArticle;
     }
 
 }

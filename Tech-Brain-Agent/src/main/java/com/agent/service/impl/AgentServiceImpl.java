@@ -1,8 +1,9 @@
-package com.agent.service;
-import com.agent.AgentService;
+package com.agent.service.impl;
+import com.agent.service.AgentService;
 import com.agent.constant.GenerateContant;
 import com.agent.entity.Article;
 import com.agent.entity.dto.ArticleSaveDTO;
+import com.agent.event.ArticleVectorSyncEvent;
 import com.agent.mapper.AgentMapper;
 import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
@@ -18,6 +19,7 @@ import dev.langchain4j.store.embedding.EmbeddingStore;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -37,6 +39,8 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
     private EmbeddingStore<TextSegment> embeddingStore;//注入Redis向量库 / Inject the Redis vector store.
     @Autowired
     private GoogleAiGeminiChatModel model;
+    @Autowired
+    private ApplicationEventPublisher eventPublisher;
 
     @Override
     public String chat(String msg) {
@@ -50,7 +54,7 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
         EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
                 .queryEmbedding(embedding)
                 .maxResults(3)//最大返回条数为3 / Return at most 3 matches.
-                .minScore(0.4)//最低相似度阔值为0.7 / Minimum similarity threshold.
+                .minScore(0.7)//最低相似度阔值为0.7 / Minimum similarity threshold.
                 .build();//构建查询参数 / Build the search request.
 
         //去Redis向量库进行相似度搜索
@@ -98,17 +102,19 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
         article.setSourceType(GenerateContant.ARTICLE_SOURCE_TYPE_AI);
         article.setCreateTime(LocalDateTime.now());
         article.setUpdateTime(LocalDateTime.now());
+        article.setVectorStatus(0);
         articleMapper.insert(article);
 
         // 将前端传来的 AI 回答内容转化为文本片段
         // Convert the AI answer from the frontend into a text segment.
-         TextSegment segment= TextSegment.from(dto.getContent());
          //调用BGE模型，提取512个维度的向量
          // Use the BGE model to extract a 512-dimensional embedding.
-         Embedding embedding = embeddingModel.embed(segment).content();
          //存入Redis向量空间
          // Store the embedding in the Redis vector space.
-         embeddingStore.add(embedding, segment);
+        eventPublisher.publishEvent(new ArticleVectorSyncEvent(
+                ArticleVectorSyncEvent.EventType.UPSERT,
+                article,
+                null));
 
 
         log.info("保存笔记成功:{}",article);

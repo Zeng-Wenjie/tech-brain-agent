@@ -1,6 +1,6 @@
 package com.agent.controller;
 
-import com.agent.AgentService;
+import com.agent.service.AgentService;
 import com.agent.aopanno.Log;
 import com.agent.entity.Result;
 import com.agent.entity.dto.ArticleSaveDTO;

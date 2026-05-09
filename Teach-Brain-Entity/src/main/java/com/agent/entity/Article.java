@@ -24,8 +24,9 @@ public class Article {
     // Automatically fill the time on update.
     @TableField(fill = FieldFill.INSERT_UPDATE)
     private LocalDateTime updateTime;
-//    逻辑删除字段
-//    Logical delete field.
-    private Boolean deleteFlag;
+    private Boolean deleteFlag;     //逻辑删除字段 / Logical delete field.
+    private String vectorId;       // 向量库ID / Vector store ID.
+    private Integer vectorStatus;  // 向量同步状态：0未同步，1成功，2失败 / Vector sync status: 0 pending, 1 success, 2 failed.
+    private String vectorError;    // 向量同步失败原因 / Vector sync error message.
 
 }

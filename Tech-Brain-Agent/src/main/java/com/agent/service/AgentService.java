@@ -1,4 +1,4 @@
-package com.agent;
+package com.agent.service;
 import com.agent.entity.Article;
 import com.agent.entity.dto.ArticleSaveDTO;
 import com.baomidou.mybatisplus.extension.service.IService;
