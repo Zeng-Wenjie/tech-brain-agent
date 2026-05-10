@@ -3,6 +3,9 @@ package com.agent.service;
 import com.agent.entity.Article;
 
 import java.util.Collection;
+/*
+    负责同步数据库
+ */
 
 public interface ArticleVectorService {
 

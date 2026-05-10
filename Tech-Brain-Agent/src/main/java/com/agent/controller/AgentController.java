@@ -52,6 +52,7 @@ public class AgentController {
 
         return Result.success("笔记已成功存入数据库");
     }
+
     @Operation(summary = "AI总结指定笔记")
     @PostMapping("/article/ai/summary/{id}")
     public Result<String> summarizeArticle(@PathVariable("id") Long articleId) {
