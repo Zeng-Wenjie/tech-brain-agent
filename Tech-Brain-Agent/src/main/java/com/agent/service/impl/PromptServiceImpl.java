@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 public class PromptServiceImpl implements PromptService {
 
     private static final String CHAT_RAG_PROMPT = "classpath:prompts/chat-rag-prompt.txt";
+    private static final String PURE_CHAT_PROMPT = "classpath:prompts/pure-chat-prompt.txt";
     private static final String ARTICLE_SUMMARY_PROMPT = "classpath:prompts/article-summary-prompt.txt";
 
     @Autowired
@@ -20,15 +21,22 @@ public class PromptServiceImpl implements PromptService {
 
     @Override
     public String buildChatPrompt(String context, String question) {
-        // 从资源文件读取RAG提示词，便于后续维护。
+        // 从资源文件读取RAG提示词。
         return loadPrompt(CHAT_RAG_PROMPT)
                 .replace("{{context}}", safe(context))
                 .replace("{{question}}", safe(question));
     }
 
     @Override
+    public String buildPureChatPrompt(String question) {
+        // Milvus无命中时使用纯问答提示词。
+        return loadPrompt(PURE_CHAT_PROMPT)
+                .replace("{{question}}", safe(question));
+    }
+
+    @Override
     public String buildArticleSummaryPrompt(String title, String content) {
-        // 从资源文件读取总结提示词，避免Java代码硬编码大段文本。
+        // 从资源文件读取文章总结提示词。
         return loadPrompt(ARTICLE_SUMMARY_PROMPT)
                 .replace("{{title}}", safe(title))
                 .replace("{{content}}", safe(content));

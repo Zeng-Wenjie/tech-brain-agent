@@ -67,7 +67,14 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
 
         EmbeddingSearchResult<TextSegment> searchResult = embeddingStore.search(searchRequest);
         List<EmbeddingMatch<TextSegment>> relatedEmbeddings = searchResult.matches();
-        log.info("Milvus article_vector search hits={}, userId={}", relatedEmbeddings.size(), currentUserId);
+        int hitCount = relatedEmbeddings == null ? 0 : relatedEmbeddings.size();
+        log.info("Milvus article_vector search hits={}, userId={}", hitCount, currentUserId);
+
+        if (relatedEmbeddings == null || relatedEmbeddings.isEmpty()) {
+            log.info("Milvus 未检索到相关资料，走纯大模型问答分支");
+            String prompt = promptService.buildPureChatPrompt(msg);
+            return model.generate(prompt);
+        }
 
         String context = relatedEmbeddings.stream()
                 .map(match -> buildContext(match.embedded()))

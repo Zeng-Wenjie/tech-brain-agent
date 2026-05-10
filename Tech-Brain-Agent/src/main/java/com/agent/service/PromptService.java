@@ -4,5 +4,7 @@ public interface PromptService {
 
     String buildChatPrompt(String context, String question);
 
+    String buildPureChatPrompt(String question);
+
     String buildArticleSummaryPrompt(String title, String content);
 }
