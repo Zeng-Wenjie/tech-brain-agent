@@ -16,4 +16,6 @@ public interface ConversationService {
     Result<List<Conversation>> listConversations();
 
     Result<List<ChatMessage>> listMessages(Long conversationId);
+
+    Result<String> deleteConversation(Long conversationId);
 }

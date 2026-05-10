@@ -8,9 +8,11 @@ import com.agent.mapper.ConversationMapper;
 import com.agent.service.ConversationService;
 import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -72,5 +74,35 @@ public class ConversationServiceImpl implements ConversationService {
                 .orderByAsc(ChatMessage::getId));
 
         return Result.success(messages);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Result<String> deleteConversation(Long conversationId) {
+        Long userId = UserContext.getUserId();
+        if (conversationId == null) {
+            return Result.error(HttpServletResponse.SC_BAD_REQUEST, "会话ID不能为空");
+        }
+
+        // 删除前先确认会话存在。
+        Conversation conversation = conversationMapper.selectById(conversationId);
+        if (conversation == null) {
+            return Result.error(HttpServletResponse.SC_NOT_FOUND, "会话不存在");
+        }
+        if (!userId.equals(conversation.getUserId())) {
+            return Result.error(HttpServletResponse.SC_FORBIDDEN, "无权删除该会话");
+        }
+
+        // 先删当前用户在该会话下的消息，避免误删其他用户数据。
+        chatMessageMapper.delete(new LambdaQueryWrapper<ChatMessage>()
+                .eq(ChatMessage::getConversationId, conversationId)
+                .eq(ChatMessage::getUserId, userId));
+
+        // 再删当前用户自己的会话，事务保证两步同时成功或回滚。
+        conversationMapper.delete(new LambdaUpdateWrapper<Conversation>()
+                .eq(Conversation::getId, conversationId)
+                .eq(Conversation::getUserId, userId));
+
+        return Result.success("会话删除成功");
     }
 }
