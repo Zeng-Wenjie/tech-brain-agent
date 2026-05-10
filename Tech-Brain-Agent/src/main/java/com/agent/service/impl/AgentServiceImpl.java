@@ -54,10 +54,16 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
 
     @Override
     public String chat(String msg) {
+        String prompt = buildFinalPrompt(msg);
+        return model.generate(prompt);
+    }
+
+    @Override
+    public String buildFinalPrompt(String msg) {
         Long currentUserId = UserContext.getUserId();
         Embedding embedding = embeddingModel.embed(msg).content();
 
-        // 保持原有Milvus检索逻辑，只替换Prompt构建方式。
+        // 保持原有Milvus检索和用户过滤逻辑，只负责构造最终Prompt。
         EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
                 .queryEmbedding(embedding)
                 .maxResults(3)
@@ -72,16 +78,14 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
 
         if (relatedEmbeddings == null || relatedEmbeddings.isEmpty()) {
             log.info("Milvus 未检索到相关资料，走纯大模型问答分支");
-            String prompt = promptService.buildPureChatPrompt(msg);
-            return model.generate(prompt);
+            return promptService.buildPureChatPrompt(msg);
         }
 
         String context = relatedEmbeddings.stream()
                 .map(match -> buildContext(match.embedded()))
                 .collect(Collectors.joining("\n\n"));
 
-        String prompt = promptService.buildChatPrompt(context, msg);
-        return model.generate(prompt);
+        return promptService.buildChatPrompt(context, msg);
     }
 
     private String buildContext(TextSegment segment) {

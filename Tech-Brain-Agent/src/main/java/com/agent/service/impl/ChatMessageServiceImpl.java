@@ -3,7 +3,6 @@ package com.agent.service.impl;
 import com.agent.entity.ChatMessage;
 import com.agent.entity.Conversation;
 import com.agent.entity.dto.ChatRequestDTO;
-import com.agent.entity.dto.ChatResponseDTO;
 import com.agent.mapper.ChatMessageMapper;
 import com.agent.mapper.ConversationMapper;
 import com.agent.service.AgentService;
@@ -11,12 +10,21 @@ import com.agent.service.ChatMessageService;
 import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import dev.langchain4j.data.message.AiMessage;
+import dev.langchain4j.model.StreamingResponseHandler;
+import dev.langchain4j.model.googleai.GoogleAiGeminiStreamingChatModel;
+import dev.langchain4j.model.output.Response;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.IOException;
 import java.time.LocalDateTime;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 @Service
 public class ChatMessageServiceImpl implements ChatMessageService {
@@ -25,6 +33,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     private static final String ROLE_ASSISTANT = "assistant";
     private static final int TITLE_MAX_LENGTH = 20;
     private static final int HISTORY_LIMIT = 8;
+    private static final long SSE_TIMEOUT = 120000L;
 
     @Autowired
     private ConversationMapper conversationMapper;
@@ -35,35 +44,96 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     @Autowired
     private AgentService agentService;
 
-    @Override
-    public ChatResponseDTO sendMessage(ChatRequestDTO dto) {
-        Long userId = UserContext.getUserId();
-        LocalDateTime now = LocalDateTime.now();
+    @Autowired
+    private GoogleAiGeminiStreamingChatModel streamingChatModel;
 
+    @Override
+    public SseEmitter sendMessage(ChatRequestDTO dto) {
+        SseEmitter emitter = new SseEmitter(SSE_TIMEOUT);
+        Long userId = UserContext.getUserId();
+
+        CompletableFuture.runAsync(() -> {
+            try {
+                // 异步线程手动恢复当前用户，保证Milvus检索按用户过滤。
+                UserContext.setUserId(userId);
+                doSendMessage(dto, userId, emitter);
+            } catch (Exception e) {
+                sendError(emitter, e);
+            } finally {
+                UserContext.removeUserId();
+            }
+        });
+
+        return emitter;
+    }
+
+    private void doSendMessage(ChatRequestDTO dto, Long userId, SseEmitter emitter) {
+        validateRequest(dto);
+
+        LocalDateTime now = LocalDateTime.now();
         Conversation conversation = resolveConversation(dto, userId, now);
 
-        // 调用大模型前读取最近历史，避免长事务包住Gemini调用。
+        // 读取最近历史，构造多轮问题。
         List<ChatMessage> historyMessages = queryRecentHistory(conversation.getId(), userId);
         String multiTurnQuestion = buildMultiTurnQuestion(dto.getMsg(), historyMessages);
 
-        // 当前用户消息仍然先落库，刷新页面可立即恢复提问。
+        // 用户消息先落库，AI回复生成完成后再落库。
         saveMessage(conversation.getId(), userId, ROLE_USER, dto.getMsg(), now);
 
-        String answer = agentService.chat(multiTurnQuestion);
+        String finalPrompt = agentService.buildFinalPrompt(multiTurnQuestion);
+        streamAnswer(finalPrompt, conversation.getId(), userId, emitter);
+    }
 
-        // AI回复继续落库，保持会话完整。
-        saveMessage(conversation.getId(), userId, ROLE_ASSISTANT, answer, LocalDateTime.now());
-        updateConversationTime(conversation.getId(), userId);
+    private void streamAnswer(String finalPrompt, Long conversationId, Long userId, SseEmitter emitter) {
+        StringBuilder fullAnswer = new StringBuilder();
 
-        ChatResponseDTO response = new ChatResponseDTO();
-        response.setConversationId(conversation.getId());
-        response.setAnswer(answer);
-        return response;
+        streamingChatModel.generate(finalPrompt, new StreamingResponseHandler<AiMessage>() {
+            @Override
+            public void onNext(String token) {
+                try {
+                    fullAnswer.append(token);
+
+                    // token 用JSON对象发送，避免前端按纯文本解析时丢片段。
+                    Map<String, String> data = new HashMap<>();
+                    data.put("content", token);
+                    emitter.send(SseEmitter.event().name("message").data(data));
+                } catch (IOException e) {
+                    emitter.completeWithError(e);
+                }
+            }
+
+            @Override
+            public void onComplete(Response<AiMessage> response) {
+                try {
+                    // 只在生成完成后保存完整AI回复，避免每个token写库。
+                    saveMessage(conversationId, userId, ROLE_ASSISTANT, fullAnswer.toString(), LocalDateTime.now());
+                    updateConversationTime(conversationId, userId);
+
+                    Map<String, Object> doneData = new HashMap<>();
+                    doneData.put("conversationId", conversationId);
+                    emitter.send(SseEmitter.event().name("done").data(doneData));
+                    emitter.complete();
+                } catch (Exception e) {
+                    emitter.completeWithError(e);
+                }
+            }
+
+            @Override
+            public void onError(Throwable error) {
+                sendError(emitter, error);
+            }
+        });
+    }
+
+    private void validateRequest(ChatRequestDTO dto) {
+        if (dto == null || dto.getMsg() == null || dto.getMsg().trim().isEmpty()) {
+            throw new IllegalArgumentException("消息内容不能为空");
+        }
     }
 
     private Conversation resolveConversation(ChatRequestDTO dto, Long userId, LocalDateTime now) {
         if (dto.getConversationId() == null) {
-            // 未传会话ID时自动创建会话，标题取用户问题前20个字。
+            // 未传会话ID时自动创建会话。
             Conversation conversation = new Conversation();
             conversation.setUserId(userId);
             conversation.setTitle(buildTitle(dto.getMsg()));
@@ -135,5 +205,17 @@ public class ChatMessageServiceImpl implements ChatMessageService {
             return "新会话";
         }
         return title.length() > TITLE_MAX_LENGTH ? title.substring(0, TITLE_MAX_LENGTH) : title;
+    }
+
+    private void sendError(SseEmitter emitter, Throwable error) {
+        try {
+            // error 也使用JSON对象，保持前端解析一致。
+            Map<String, String> errorData = new HashMap<>();
+            errorData.put("message", error.getMessage());
+            emitter.send(SseEmitter.event().name("error").data(errorData));
+        } catch (IOException ignored) {
+            // 连接断开时忽略二次发送失败。
+        }
+        emitter.completeWithError(error);
     }
 }
