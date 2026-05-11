@@ -24,8 +24,8 @@ services:
     restart: always
     image: minio/minio:RELEASE.2024-12-18T13-15-44Z
     environment:
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
     ports:
       - "9001:9001"
       - "9000:9000"
