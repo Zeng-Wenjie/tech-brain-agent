@@ -56,6 +56,13 @@ aliyun:
 gemini:
   api-key: ${GEMINI_API_KEY}
 
+deepseek:
+  api-key: ${DEEPSEEK_API_KEY}
+  base-url: https://api.deepseek.com/v1
+  model-name: deepseek-v4-pro
+  temperature: 0.7
+  timeout-seconds: 120
+
 milvus:
   host: localhost
   port: 19530

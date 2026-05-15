@@ -12,8 +12,8 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
+import dev.langchain4j.model.chat.ChatLanguageModel;
 import dev.langchain4j.model.embedding.EmbeddingModel;
-import dev.langchain4j.model.googleai.GoogleAiGeminiChatModel;
 import dev.langchain4j.store.embedding.EmbeddingMatch;
 import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
 import dev.langchain4j.store.embedding.EmbeddingSearchResult;
@@ -44,7 +44,7 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
     private EmbeddingStore<TextSegment> embeddingStore;
 
     @Autowired
-    private GoogleAiGeminiChatModel model;
+    private ChatLanguageModel chatLanguageModel;
 
     @Autowired
     private ApplicationEventPublisher eventPublisher;
@@ -55,7 +55,7 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
     @Override
     public String chat(String msg) {
         String prompt = buildFinalPrompt(msg);
-        return model.generate(prompt);
+        return chatLanguageModel.generate(prompt);
     }
 
     @Override
@@ -132,6 +132,6 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
         }
 
         String prompt = promptService.buildArticleSummaryPrompt(article.getTitle(), article.getContent());
-        return model.generate(prompt);
+        return chatLanguageModel.generate(prompt);
     }
 }

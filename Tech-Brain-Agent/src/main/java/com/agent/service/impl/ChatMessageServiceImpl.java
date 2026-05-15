@@ -12,7 +12,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.model.StreamingResponseHandler;
-import dev.langchain4j.model.googleai.GoogleAiGeminiStreamingChatModel;
+import dev.langchain4j.model.chat.StreamingChatLanguageModel;
 import dev.langchain4j.model.output.Response;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -45,7 +45,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     private AgentService agentService;
 
     @Autowired
-    private GoogleAiGeminiStreamingChatModel streamingChatModel;
+    private StreamingChatLanguageModel streamingChatLanguageModel;
 
     @Override
     public SseEmitter sendMessage(ChatRequestDTO dto) {
@@ -87,7 +87,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     private void streamAnswer(String finalPrompt, Long conversationId, Long userId, SseEmitter emitter) {
         StringBuilder fullAnswer = new StringBuilder();
 
-        streamingChatModel.generate(finalPrompt, new StreamingResponseHandler<AiMessage>() {
+        streamingChatLanguageModel.generate(finalPrompt, new StreamingResponseHandler<AiMessage>() {
             @Override
             public void onNext(String token) {
                 try {
