@@ -21,14 +21,14 @@ import java.util.List;
 public class ConversationServiceImpl implements ConversationService {
 
     @Autowired
-    private ConversationMapper conversationMapper;
+    private ConversationMapper conversationMapper; // 会话主表访问入口，所有查询都需要围绕当前用户做隔离。
 
     @Autowired
-    private ChatMessageMapper chatMessageMapper;
+    private ChatMessageMapper chatMessageMapper; // 删除会话和查询历史时同步处理 chat_message 明细。
 
     @Override
     public Result<Long> createConversation() {
-        Long userId = UserContext.getUserId();
+        Long userId = UserContext.getUserId(); // 会话归属始终来自登录上下文，不信任前端传用户 ID。
         LocalDateTime now = LocalDateTime.now();
 
         // 新建空会话，后续首次提问会写入消息。
@@ -44,7 +44,7 @@ public class ConversationServiceImpl implements ConversationService {
 
     @Override
     public Result<List<Conversation>> listConversations() {
-        Long userId = UserContext.getUserId();
+        Long userId = UserContext.getUserId(); // 列表接口只查当前用户，防止越权看到其他人的会话标题。
 
         // 只返回当前用户自己的会话，避免会话列表串号。
         List<Conversation> conversations = conversationMapper.selectList(new LambdaQueryWrapper<Conversation>()
@@ -61,7 +61,7 @@ public class ConversationServiceImpl implements ConversationService {
             return Result.error(HttpServletResponse.SC_BAD_REQUEST, "会话ID不能为空");
         }
 
-        Conversation conversation = conversationMapper.selectById(conversationId);
+        Conversation conversation = conversationMapper.selectById(conversationId); // 先查会话再查消息，权限边界放在会话归属上。
         if (conversation == null || !userId.equals(conversation.getUserId())) {
             return Result.error(HttpServletResponse.SC_FORBIDDEN, "无权访问该会话");
         }
@@ -77,9 +77,9 @@ public class ConversationServiceImpl implements ConversationService {
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
+    @Transactional(rollbackFor = Exception.class) // 删除会话和消息必须在同一事务中完成，避免只删一半产生孤儿数据。
     public Result<String> deleteConversation(Long conversationId) {
-        Long userId = UserContext.getUserId();
+        Long userId = UserContext.getUserId(); // 删除操作同样以登录用户为准，防止越权删除。
         if (conversationId == null) {
             return Result.error(HttpServletResponse.SC_BAD_REQUEST, "会话ID不能为空");
         }

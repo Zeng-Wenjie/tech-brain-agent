@@ -21,11 +21,11 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 public class AgentController {
     @Autowired
-    private AgentService agentService;
+    private AgentService agentService; // Controller 只编排请求入口，核心 Tool Calling/RAG/笔记逻辑交给 Service。
 
     @Operation(summary = "智能RAG问答")
     @GetMapping("/chat")
-    public Result<String> chat(@RequestParam String msg) {
+    public Result<String> chat(@RequestParam String msg) { // 旧版同步聊天接口：一次性返回完整回答，主要用于兼容非 SSE 调用。
         log.info("接收到前端提问: {}", msg); // 打印请求参数//接收参数 / Log and receive the request parameter.
         String response = agentService.chat(msg);
         log.info("大模型生成完毕，准备返回: {}", response);
@@ -37,7 +37,7 @@ public class AgentController {
     @Operation(summary = "保存AI回复为笔记")
     @Log
     @PostMapping("/save-note")
-    public Result<String> saveNote(@RequestBody ArticleSaveDTO dto) {
+    public Result<String> saveNote(@RequestBody ArticleSaveDTO dto) { // 将 AI 回复沉淀为笔记，后续会进入 MySQL 和向量同步链路。
         // 基础参数校验
         // Basic parameter validation.
         if (dto.getTitle() == null || dto.getTitle().trim().isEmpty()) {
@@ -55,7 +55,7 @@ public class AgentController {
 
     @Operation(summary = "AI总结指定笔记")
     @PostMapping("/article/ai/summary/{id}")
-    public Result<String> summarizeArticle(@PathVariable("id") Long articleId) {
+    public Result<String> summarizeArticle(@PathVariable("id") Long articleId) { // 根据当前用户的文章生成 AI 摘要，权限校验在 Service 层完成。
         String summary = agentService.summarizeArticle(articleId);
         return Result.success(summary);
     }

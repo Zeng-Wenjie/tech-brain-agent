@@ -32,8 +32,8 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     private static final String ROLE_USER = "user";
     private static final String ROLE_ASSISTANT = "assistant";
     private static final int TITLE_MAX_LENGTH = 20;
-    private static final int HISTORY_LIMIT = 8;
-    private static final long SSE_TIMEOUT = 120000L;
+    private static final int HISTORY_LIMIT = 100; // 控制多轮上下文长度，避免历史过长导致 Prompt 超限或响应变慢。
+    private static final long SSE_TIMEOUT = 120000L; // SSE 连接最长等待时间，给流式模型生成保留足够窗口。
 
     @Autowired
     private ConversationMapper conversationMapper;
@@ -42,17 +42,17 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     private ChatMessageMapper chatMessageMapper;
 
     @Autowired
-    private AgentService agentService;
+    private AgentService agentService; // 复用 AgentService 的 RAG Prompt 构造链路，避免聊天入口重复实现检索逻辑。
 
     @Autowired
-    private StreamingChatLanguageModel streamingChatLanguageModel;
+    private StreamingChatLanguageModel streamingChatLanguageModel; // 流式模型按 token 回调，支撑 POST /chat/message 的 SSE 输出。
 
     @Override
     public SseEmitter sendMessage(ChatRequestDTO dto) {
-        SseEmitter emitter = new SseEmitter(SSE_TIMEOUT);
+        SseEmitter emitter = new SseEmitter(SSE_TIMEOUT); // HTTP 响应先返回 emitter，后续 token 通过同一连接持续推送。
         Long userId = UserContext.getUserId();
 
-        CompletableFuture.runAsync(() -> {
+        CompletableFuture.runAsync(() -> { // 流式输出不放进 Controller 线程，也不包长事务，避免连接等待阻塞请求线程。
             try {
                 // 异步线程手动恢复当前用户，保证Milvus检索按用户过滤。
                 UserContext.setUserId(userId);
@@ -68,30 +68,30 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     }
 
     private void doSendMessage(ChatRequestDTO dto, Long userId, SseEmitter emitter) {
-        validateRequest(dto);
+        validateRequest(dto); // POST /chat/message 的入口校验，后续流程默认 msg 可用。
 
         LocalDateTime now = LocalDateTime.now();
-        Conversation conversation = resolveConversation(dto, userId, now);
+        Conversation conversation = resolveConversation(dto, userId, now); // 无会话则新建，有会话则校验归属后复用。
 
         // 读取最近历史，构造多轮问题。
         List<ChatMessage> historyMessages = queryRecentHistory(conversation.getId(), userId);
-        String multiTurnQuestion = buildMultiTurnQuestion(dto.getMsg(), historyMessages);
+        String multiTurnQuestion = buildMultiTurnQuestion(dto.getMsg(), historyMessages); // 把最近历史拼入当前问题，补足代词和上下文依赖。
 
         // 用户消息先落库，AI回复生成完成后再落库。
         saveMessage(conversation.getId(), userId, ROLE_USER, dto.getMsg(), now);
 
-        String finalPrompt = agentService.buildFinalPrompt(multiTurnQuestion);
+        String finalPrompt = agentService.buildFinalPrompt(multiTurnQuestion); // 多轮问题进入 RAG：先 embedding 检索，再选择纯聊天或 RAG Prompt。
         streamAnswer(finalPrompt, conversation.getId(), userId, emitter);
     }
 
     private void streamAnswer(String finalPrompt, Long conversationId, Long userId, SseEmitter emitter) {
-        StringBuilder fullAnswer = new StringBuilder();
+        StringBuilder fullAnswer = new StringBuilder(); // token 只在内存聚合，完整回复等 onComplete 再一次性落库。
 
         streamingChatLanguageModel.generate(finalPrompt, new StreamingResponseHandler<AiMessage>() {
             @Override
             public void onNext(String token) {
                 try {
-                    fullAnswer.append(token);
+                    fullAnswer.append(token); // onNext 只拼接和推送 token，不写数据库，避免高频写库拖慢流式输出。
 
                     // token 用JSON对象发送，避免前端按纯文本解析时丢片段。
                     Map<String, String> data = new HashMap<>();
@@ -109,7 +109,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
                     saveMessage(conversationId, userId, ROLE_ASSISTANT, fullAnswer.toString(), LocalDateTime.now());
                     updateConversationTime(conversationId, userId);
 
-                    Map<String, Object> doneData = new HashMap<>();
+                    Map<String, Object> doneData = new HashMap<>(); // done 事件返回 conversationId，前端新会话首轮发送后可拿到真实会话 ID。
                     doneData.put("conversationId", conversationId);
                     emitter.send(SseEmitter.event().name("done").data(doneData));
                     emitter.complete();
@@ -143,8 +143,8 @@ public class ChatMessageServiceImpl implements ChatMessageService {
             return conversation;
         }
 
-        Conversation conversation = conversationMapper.selectById(dto.getConversationId());
-        if (conversation == null || !userId.equals(conversation.getUserId())) {
+        Conversation conversation = conversationMapper.selectById(dto.getConversationId()); // 已有会话必须查库确认真实存在。
+        if (conversation == null || !userId.equals(conversation.getUserId())) { // 校验 conversation.userId，防止用户伪造会话 ID 继续对话。
             throw new IllegalArgumentException("无权访问该会话");
         }
         return conversation;
@@ -157,8 +157,8 @@ public class ChatMessageServiceImpl implements ChatMessageService {
                 .eq(ChatMessage::getUserId, userId)
                 .orderByDesc(ChatMessage::getCreateTime)
                 .orderByDesc(ChatMessage::getId)
-                .last("LIMIT " + HISTORY_LIMIT));
-        Collections.reverse(historyMessages);
+                .last("LIMIT " + HISTORY_LIMIT)); // 先倒序取最近 N 条，数据库可以利用时间排序快速截断。
+        Collections.reverse(historyMessages); // 再 reverse 成真实对话顺序，保证 Prompt 中上下文从旧到新。
         return historyMessages;
     }
 
@@ -167,7 +167,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
             return currentQuestion;
         }
 
-        StringBuilder builder = new StringBuilder();
+        StringBuilder builder = new StringBuilder(); // 多轮上下文以“用户/助手”角色标记，帮助模型理解追问指代。
         for (ChatMessage message : historyMessages) {
             if (ROLE_USER.equals(message.getRole())) {
                 builder.append("用户：");
@@ -183,7 +183,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     }
 
     private void saveMessage(Long conversationId, Long userId, String role, String content, LocalDateTime createTime) {
-        ChatMessage message = new ChatMessage();
+        ChatMessage message = new ChatMessage(); // 用户消息先保存，assistant 消息在流式完成后保存，保证历史可追溯。
         message.setConversationId(conversationId);
         message.setUserId(userId);
         message.setRole(role);
@@ -193,7 +193,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     }
 
     private void updateConversationTime(Long conversationId, Long userId) {
-        conversationMapper.update(null, new LambdaUpdateWrapper<Conversation>()
+        conversationMapper.update(null, new LambdaUpdateWrapper<Conversation>() // 回复完成后刷新会话时间，用于会话列表按最近活跃排序。
                 .eq(Conversation::getId, conversationId)
                 .eq(Conversation::getUserId, userId)
                 .set(Conversation::getUpdateTime, LocalDateTime.now()));
@@ -208,7 +208,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     }
 
     private void sendError(SseEmitter emitter, Throwable error) {
-        try {
+        try { // error 事件尽量发给前端，便于 UI 结束加载态并展示失败原因。
             // error 也使用JSON对象，保持前端解析一致。
             Map<String, String> errorData = new HashMap<>();
             errorData.put("message", error.getMessage());

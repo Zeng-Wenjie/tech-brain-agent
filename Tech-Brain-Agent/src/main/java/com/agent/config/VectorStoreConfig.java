@@ -13,29 +13,29 @@ import org.springframework.context.annotation.Configuration;
 public class VectorStoreConfig {
 
     @Value("${milvus.host:localhost}")
-    private String milvusHost;
+    private String milvusHost; // Milvus 服务地址，应用通过它连接向量数据库。
 
     @Value("${milvus.port:19530}")
-    private Integer milvusPort;
+    private Integer milvusPort; // Milvus 端口，默认 19530。
 
     @Value("${milvus.collection-name:article_vector}")
-    private String collectionName;
+    private String collectionName; // collection 类似表名，article_vector 专门存文章向量。
 
     @Value("${milvus.dimension:512}")
-    private Integer dimension;
+    private Integer dimension; // 向量维度必须和 BgeSmallZhV15EmbeddingModel 输出维度一致，否则写入/检索会失败。
 
     @Bean
     public EmbeddingModel embeddingModel() {
-        return new BgeSmallZhV15EmbeddingModel();
+        return new BgeSmallZhV15EmbeddingModel(); // 中文 embedding 模型，负责把文章和问题映射到同一语义空间。
     }
 
     @Bean
     public EmbeddingStore<TextSegment> embeddingStore() {
-        return MilvusEmbeddingStore.builder()
+        return MilvusEmbeddingStore.builder() // 初始化 LangChain4j 的 Milvus 向量库封装，供 RAG 检索和向量同步复用。
                 .host(milvusHost)
                 .port(milvusPort)
-                .collectionName(collectionName)
-                .dimension(dimension)
+                .collectionName(collectionName) // 指定集合后，文章向量会集中写入该 Milvus collection。
+                .dimension(dimension) // collection 初始化和检索都依赖该维度配置。
                 .build();
     }
 }
