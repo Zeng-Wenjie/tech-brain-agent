@@ -88,6 +88,33 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
         return promptService.buildChatPrompt(context, msg); // 有命中时构造 RAG Prompt，让模型基于用户笔记回答。
     }
 
+    @Override
+    public List<String> searchRagContents(String query) { // Tool Calling 专用：只做现有 Milvus 检索，不调用大模型。
+        Long currentUserId = UserContext.getUserId(); // 沿用原 RAG 的用户隔离策略，避免检索到其他用户笔记。
+        Embedding embedding = embeddingModel.embed(query).content(); // 将工具 query 转成向量，和文章向量在 Milvus 中做相似度匹配。
+
+        EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
+                .queryEmbedding(embedding) // 使用 query embedding 作为 Milvus 检索向量。
+                .maxResults(3) // 沿用原 RAG topK=3，控制返回给 Tool Calling 的上下文长度。
+                .minScore(0.7) // 沿用原相似度阈值，避免低相关内容进入工具结果。
+                .filter(MetadataFilterBuilder.metadataKey("userId").isEqualTo(String.valueOf(currentUserId))) // 继续按 userId 过滤私有知识库。
+                .build();
+
+        EmbeddingSearchResult<TextSegment> searchResult = embeddingStore.search(searchRequest); // 通过现有 EmbeddingStore 实际检索 Milvus。
+        List<EmbeddingMatch<TextSegment>> relatedEmbeddings = searchResult.matches(); // 取出 Milvus 返回的相似片段。
+        int hitCount = relatedEmbeddings == null ? 0 : relatedEmbeddings.size(); // 统计命中数量，便于日志排查。
+        log.info("Milvus article_vector tool search hits={}, userId={}", hitCount, currentUserId); // 复用同一 collection 的检索日志。
+
+        if (relatedEmbeddings == null || relatedEmbeddings.isEmpty()) { // 无命中时返回空集合，由 ToolChat 统一生成无结果文案。
+            return List.of();
+        }
+
+        return relatedEmbeddings.stream()
+                .map(match -> buildContext(match.embedded())) // 复用原有 context 构造逻辑，从 metadata/text 中还原知识片段。
+                .filter(context -> context != null && !context.isBlank()) // 过滤空内容，避免空片段干扰模型回答。
+                .collect(Collectors.toList());
+    }
+
     private String buildContext(TextSegment segment) {
         String title = segment.metadata().getString("title"); // 优先使用同步向量时写入的标题，回答时更容易定位来源。
         String content = segment.metadata().getString("content"); // content 来自文章正文，是 RAG 主要知识内容。
