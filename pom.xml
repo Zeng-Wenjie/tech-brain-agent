@@ -27,6 +27,7 @@
     <!--聚合-->
     <modules>
         <module>Tech-Brain-Agent</module>
+        <module>Tech-Brain-Tool</module>
         <module>Teach-Brain-Entity</module>
         <module>Tech-Brain-Common</module>
         <module>Tech-Brain-Notes</module>

@@ -50,6 +50,12 @@
             <artifactId>Tech-Bain-Login</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <!--Tool Calling公共模块-->
+        <dependency>
+            <groupId>com.agent</groupId>
+            <artifactId>Tech-Brain-Tool</artifactId>
+            <version>${project.version}</version>
+        </dependency>
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
