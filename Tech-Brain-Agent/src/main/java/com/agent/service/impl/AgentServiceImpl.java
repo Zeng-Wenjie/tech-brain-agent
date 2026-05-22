@@ -7,6 +7,7 @@ import com.agent.event.ArticleVectorSyncEvent;
 import com.agent.mapper.AgentMapper;
 import com.agent.service.AgentService;
 import com.agent.service.PromptService;
+import com.agent.toolcalling.core.ToolCallingChatService;
 import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
@@ -23,6 +24,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -30,6 +32,13 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.stream.Collectors;
 
+/**
+ * AI问答与AI笔记业务实现。
+ *
+ * <p>该类是正式GET /chat入口背后的核心Service实现，当前调用链为：AgentController.chat(msg) -> AgentServiceImpl.chat(msg) -> ToolCallingChatService.chat(msg) -> DeepSeek Tool Calling -> RagSearchTool -> searchRagContents(query) -> Milvus。</p>
+ * <p>本类仍保留旧版buildFinalPrompt(msg)主动RAG Prompt拼接逻辑，方便后续回退或对比；Tool Calling真实RAG检索入口则复用searchRagContents(query)。</p>
+ * <p>保存AI笔记和文章总结逻辑继续留在本类，保存笔记时仍先写MySQL再发布向量同步事件，不改变原有Milvus同步链路。</p>
+ */
 @Slf4j
 @Service
 public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implements AgentService {
@@ -52,10 +61,15 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
     @Autowired
     private PromptService promptService; // 统一构造 Prompt，避免 RAG、纯聊天、总结模板散落在业务代码中。
 
+    @Lazy // ToolRegistry -> RagSearchTool -> AgentService 会形成引用链，延迟注入可避免启动期循环依赖。
+    @Autowired
+    private ToolCallingChatService toolCallingChatService; // 正式 /chat 入口现在统一走公共 Tool Calling 编排器。
+
     @Override
     public String chat(String msg) {
-        String prompt = buildFinalPrompt(msg); // 同步聊天调用链：问题 -> 向量检索/Prompt 构造 -> 同步模型生成。
-        return chatLanguageModel.generate(prompt);
+        log.info("[Chat] use ToolCallingChatService: true"); // 标记正式 /chat 已切换到 Tool Calling 编排链路。
+        log.info("[Chat] user message: {}", msg); // 打印正式聊天入口收到的原始问题。
+        return toolCallingChatService.chat(msg); // 交给公共编排器，由模型自行决定是否调用 ragSearch。
     }
 
     @Override
