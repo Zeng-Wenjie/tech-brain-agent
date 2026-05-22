@@ -65,12 +65,12 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
     @Autowired
     private ToolCallingChatService toolCallingChatService; // 正式 /chat 入口现在统一走公共 Tool Calling 编排器。
 
-    @Override
-    public String chat(String msg) {
-        log.info("[Chat] use ToolCallingChatService: true"); // 标记正式 /chat 已切换到 Tool Calling 编排链路。
-        log.info("[Chat] user message: {}", msg); // 打印正式聊天入口收到的原始问题。
-        return toolCallingChatService.chat(msg); // 交给公共编排器，由模型自行决定是否调用 ragSearch。
-    }
+//    @Override
+//    public String chat(String msg) {
+//        log.info("[Chat] use ToolCallingChatService: true"); // 标记正式 /chat 已切换到 Tool Calling 编排链路。
+//        log.info("[Chat] user message: {}", msg); // 打印正式聊天入口收到的原始问题。
+//        return toolCallingChatService.chat(msg); // 交给公共编排器，由模型自行决定是否调用 ragSearch。
+//    }
 
     @Override
     public String buildFinalPrompt(String msg) {

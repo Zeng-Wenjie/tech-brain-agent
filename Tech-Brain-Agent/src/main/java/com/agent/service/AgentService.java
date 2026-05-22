@@ -9,7 +9,7 @@ import java.util.List; // Tool Calling 真实 RAG 检索返回多个知识片段
 
 public interface AgentService extends IService<Article> {
 
-    String chat(String msg);
+//    String chat(String msg);
 
     String buildFinalPrompt(String msg);
 
