@@ -9,11 +9,9 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @Tag(name = "AI问答与笔记保存接口")
@@ -22,17 +20,6 @@ import org.springframework.web.bind.annotation.RestController;
 public class AgentController {
     @Autowired
     private AgentService agentService; // Controller 只编排请求入口，核心 Tool Calling/RAG/笔记逻辑交给 Service。
-
-//    @Operation(summary = "智能RAG问答")
-//    @GetMapping("/chat")
-//    public Result<String> chat(@RequestParam String msg) { // 旧版同步聊天接口：一次性返回完整回答，主要用于兼容非 SSE 调用。
-//        log.info("接收到前端提问: {}", msg); // 打印请求参数//接收参数 / Log and receive the request parameter.
-//        String response = agentService.chat(msg);
-//        log.info("大模型生成完毕，准备返回: {}", response);
-//        // 打印返回结果
-//        // Log the response result.
-//        return Result.success(response);
-//    }
 
     @Operation(summary = "保存AI回复为笔记")
     @Log

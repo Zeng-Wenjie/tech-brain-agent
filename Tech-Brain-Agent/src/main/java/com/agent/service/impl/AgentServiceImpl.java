@@ -7,7 +7,6 @@ import com.agent.event.ArticleVectorSyncEvent;
 import com.agent.mapper.AgentMapper;
 import com.agent.service.AgentService;
 import com.agent.service.PromptService;
-import com.agent.toolcalling.core.ToolCallingChatService;
 import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
@@ -24,7 +23,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationEventPublisher;
-import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -35,8 +33,8 @@ import java.util.stream.Collectors;
 /**
  * AI问答与AI笔记业务实现。
  *
- * <p>该类是正式GET /chat入口背后的核心Service实现，当前调用链为：AgentController.chat(msg) -> AgentServiceImpl.chat(msg) -> ToolCallingChatService.chat(msg) -> DeepSeek Tool Calling -> RagSearchTool -> searchRagContents(query) -> Milvus。</p>
- * <p>本类仍保留旧版buildFinalPrompt(msg)主动RAG Prompt拼接逻辑，方便后续回退或对比；Tool Calling真实RAG检索入口则复用searchRagContents(query)。</p>
+ * <p>当前正式聊天入口已经统一为POST /chat/message，本类不再承载旧同步/chat问答和旧主动拼Prompt链路。</p>
+ * <p>Tool Calling真实RAG检索入口仍复用searchRagContents(query)，调用链为：RagSearchTool -> AgentService.searchRagContents(query) -> Milvus。</p>
  * <p>保存AI笔记和文章总结逻辑继续留在本类，保存笔记时仍先写MySQL再发布向量同步事件，不改变原有Milvus同步链路。</p>
  */
 @Slf4j
@@ -53,54 +51,13 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
     private EmbeddingStore<TextSegment> embeddingStore; // Milvus 向量库入口，存放文章向量和用于 RAG 的元数据。
 
     @Autowired
-    private ChatLanguageModel chatLanguageModel; // 同步大模型，用于 /chat 和文章总结这类一次性完整生成。
+    private ChatLanguageModel chatLanguageModel; // 同步大模型，用于文章总结这类一次性完整生成。
 
     @Autowired
     private ApplicationEventPublisher eventPublisher; // 保存笔记后发布事件，让向量同步在事务提交后衔接。
 
     @Autowired
     private PromptService promptService; // 统一构造 Prompt，避免 RAG、纯聊天、总结模板散落在业务代码中。
-
-    @Lazy // ToolRegistry -> RagSearchTool -> AgentService 会形成引用链，延迟注入可避免启动期循环依赖。
-    @Autowired
-    private ToolCallingChatService toolCallingChatService; // 正式 /chat 入口现在统一走公共 Tool Calling 编排器。
-
-//    @Override
-//    public String chat(String msg) {
-//        log.info("[Chat] use ToolCallingChatService: true"); // 标记正式 /chat 已切换到 Tool Calling 编排链路。
-//        log.info("[Chat] user message: {}", msg); // 打印正式聊天入口收到的原始问题。
-//        return toolCallingChatService.chat(msg); // 交给公共编排器，由模型自行决定是否调用 ragSearch。
-//    }
-
-    @Override
-    public String buildFinalPrompt(String msg) {
-        Long currentUserId = UserContext.getUserId(); // RAG 检索必须带用户维度，避免命中其他用户的私有笔记。
-        Embedding embedding = embeddingModel.embed(msg).content(); // 多轮问题会先被拼成完整问题，再整体生成 embedding。
-
-        // 保持原有Milvus检索和用户过滤逻辑，只负责构造最终Prompt。
-        EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
-                .queryEmbedding(embedding) // 用当前问题向量作为查询向量，寻找语义相近的文章片段。
-                .maxResults(3) // 控制上下文长度，只取最相关的少量笔记进入 Prompt。
-                .minScore(0.7) // 相似度低于阈值时不强行拼 RAG，避免无关资料污染回答。
-                .filter(MetadataFilterBuilder.metadataKey("userId").isEqualTo(String.valueOf(currentUserId)))
-                .build();
-
-        EmbeddingSearchResult<TextSegment> searchResult = embeddingStore.search(searchRequest);
-        List<EmbeddingMatch<TextSegment>> relatedEmbeddings = searchResult.matches(); // Milvus 返回的候选上下文，后面会转成 RAG context。
-        int hitCount = relatedEmbeddings == null ? 0 : relatedEmbeddings.size();
-        log.info("Milvus article_vector search hits={}, userId={}", hitCount, currentUserId);
-
-        if (relatedEmbeddings == null || relatedEmbeddings.isEmpty()) {
-            log.info("Milvus 未检索到相关资料，走纯大模型问答分支");
-            return promptService.buildPureChatPrompt(msg); // 没有可靠知识命中时走纯大模型，避免把空上下文伪装成知识库答案。
-        }
-
-        String context = relatedEmbeddings.stream()
-                .map(match -> buildContext(match.embedded())) // 将 Milvus 中的 TextSegment 和 metadata 还原成模型可读上下文。
-                .collect(Collectors.joining("\n\n"));
-
-        return promptService.buildChatPrompt(context, msg); // 有命中时构造 RAG Prompt，让模型基于用户笔记回答。
-    }
 
     @Override
     public List<String> searchRagContents(String query) { // Tool Calling 专用：只做现有 Milvus 检索，不调用大模型。

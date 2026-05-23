@@ -18,7 +18,7 @@ import java.util.Map; // 按工具名索引AiTool。
  *
  * <p>该类由Spring自动收集所有AiTool Bean，并建立按工具名称查询的注册表。</p>
  * <p>调用链规划为：具体AiTool实现注册为Spring Bean -> ToolRegistry构造时收集并校验重复名称 -> Tool Calling服务调用buildToolsJson生成DeepSeek tools参数 -> 模型返回tool_call后按name获取工具执行。</p>
- * <p>当前步骤只提供通用注册能力，不接入RagSearchTool，不改变/api/ai/tool-chat现有流程，也不依赖Milvus、AgentService或数据库。</p>
+ * <p>当前正式链路由ToolCallingChatService.chatStream调用本注册中心，具体业务工具由Agent模块以AiTool Bean形式接入。</p>
  */
 @Slf4j // 生成日志对象，用于输出注册结果。
 @Component // 让Spring容器管理该注册中心。
