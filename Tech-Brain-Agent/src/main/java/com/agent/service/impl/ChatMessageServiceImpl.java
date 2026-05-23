@@ -8,6 +8,7 @@ import com.agent.mapper.ConversationMapper;
 import com.agent.service.AgentService;
 import com.agent.service.ChatMessageService;
 import com.agent.toolcalling.core.ToolCallingChatService;
+import com.agent.toolcalling.core.ToolCallingStreamCallback;
 import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
@@ -98,11 +99,45 @@ public class ChatMessageServiceImpl implements ChatMessageService {
 
         log.info("[ChatMessage] configured answer mode: {}", answerMode); // 打印配置文件中的回答模式，确认当前默认仍是 legacy。
         if ("tool-calling".equalsIgnoreCase(answerMode)) { // 配置为 tool-calling 时切换到新的 Tool Calling 完整答案链路。
-            log.info("[ChatMessage] use ToolCallingChatService: true"); // 标记当前 /chat/message 已实际调用 ToolCallingChatService。
-            log.info("[ChatMessage] answer mode: tool-calling"); // 明确当前分支为 tool-calling。
+            log.info("[ChatMessage] use ToolCallingChatService.chatStream: true"); // 标记当前 /chat/message 已实际调用 Tool Calling 流式编排器。
+            log.info("[ChatMessage] answer mode: tool-calling-stream"); // 明确当前分支为 Tool Calling 流式输出。
             log.info("[ChatMessage] multi turn question: {}", multiTurnQuestion); // 再次打印传给 Tool Calling 的多轮问题，方便定位工具调用输入。
-            String answer = toolCallingChatService.chat(multiTurnQuestion); // 调用公共 Tool Calling 编排器，由模型决定是否调用 ragSearch。
-            sendFullAnswer(answer, conversation.getId(), userId, emitter); // Tool Calling 返回完整答案后，通过 SSE 一次性推给前端并保存 assistant 消息。
+            StringBuilder fullAnswer = new StringBuilder(); // Tool Calling 流式 token 先在内存聚合，完成后一次性保存 assistant 消息。
+            toolCallingChatService.chatStream(multiTurnQuestion, new ToolCallingStreamCallback() { // 调用公共 Tool Calling 流式编排器，由模型决定是否调用 ragSearch。
+                @Override
+                public void onToken(String token) { // 收到最终回答的增量 token。
+                    try {
+                        log.info("[ChatMessage] stream token received"); // 只记录收到 token，不打印具体内容，避免日志过长。
+                        fullAnswer.append(token); // 累积完整 assistant 回复，完成后写入 chat_message。
+                        Map<String, String> data = new HashMap<>(); // 沿用当前 SSE message 事件数据结构，前端无需改造。
+                        data.put("content", token); // 每次只发送增量 token，恢复前端逐 token 流式显示。
+                        emitter.send(SseEmitter.event().name("message").data(data)); // 通过 SSE message 事件推送 token。
+                    } catch (IOException e) {
+                        throw new RuntimeException("Tool Calling 流式 token 发送失败", e); // 交给 chatStream 外层 onError 兜底处理。
+                    }
+                }
+
+                @Override
+                public void onComplete() { // DeepSeek 流式输出结束。
+                    try {
+                        log.info("[ChatMessage] stream complete, save assistant message"); // 标记流式完成后开始保存完整 assistant 回复。
+                        saveMessage(conversation.getId(), userId, ROLE_ASSISTANT, fullAnswer.toString(), LocalDateTime.now()); // 保存完整 assistant 消息，保证聊天历史完整。
+                        updateConversationTime(conversation.getId(), userId); // 刷新会话更新时间，保持会话列表排序正确。
+                        Map<String, Object> doneData = new HashMap<>(); // done 事件携带 conversationId，保持前端完成事件格式不变。
+                        doneData.put("conversationId", conversation.getId()); // 返回真实会话 ID，兼容新会话首轮发送场景。
+                        log.info("[ChatMessage] send done event after stream"); // 标记准备发送 Tool Calling 流式 done 事件。
+                        emitter.send(SseEmitter.event().name("done").data(doneData)); // 通知前端本轮流式回答完成。
+                        emitter.complete(); // 正常结束 SSE 连接。
+                    } catch (Exception e) {
+                        sendError(emitter, e); // 保存消息或发送 done 失败时走统一错误事件。
+                    }
+                }
+
+                @Override
+                public void onError(Throwable error) { // Tool Calling 编排、工具执行或 DeepSeek 流式调用异常。
+                    sendError(emitter, error); // 统一发送 SSE error 事件并结束连接。
+                }
+            });
             return; // tool-calling 分支已完成本轮响应，避免继续执行 legacy 流式分支。
         }
         log.info("[ChatMessage] use legacy answer mode"); // 默认模式下明确使用 legacy 链路。
