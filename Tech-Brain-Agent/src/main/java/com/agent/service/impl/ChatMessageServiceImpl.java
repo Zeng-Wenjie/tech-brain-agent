@@ -7,6 +7,7 @@ import com.agent.mapper.ChatMessageMapper;
 import com.agent.mapper.ConversationMapper;
 import com.agent.service.AgentService;
 import com.agent.service.ChatMessageService;
+import com.agent.toolcalling.core.ToolCallingChatService;
 import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
@@ -14,7 +15,9 @@ import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.model.StreamingResponseHandler;
 import dev.langchain4j.model.chat.StreamingChatLanguageModel;
 import dev.langchain4j.model.output.Response;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -26,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
+@Slf4j
 @Service
 public class ChatMessageServiceImpl implements ChatMessageService {
 
@@ -46,6 +50,12 @@ public class ChatMessageServiceImpl implements ChatMessageService {
 
     @Autowired
     private StreamingChatLanguageModel streamingChatLanguageModel; // 流式模型按 token 回调，支撑 POST /chat/message 的 SSE 输出。
+
+    @Autowired
+    private ToolCallingChatService toolCallingChatService; // Tool Calling 完整答案编排器，仅在 answer-mode=tool-calling 时使用。
+
+    @Value("${chat.message.answer-mode:legacy}")
+    private String answerMode; // /chat/message 回答模式开关，默认 legacy，后续第 3.5.4 再启用 tool-calling。
 
     @Override
     public SseEmitter sendMessage(ChatRequestDTO dto) {
@@ -69,17 +79,39 @@ public class ChatMessageServiceImpl implements ChatMessageService {
 
     private void doSendMessage(ChatRequestDTO dto, Long userId, SseEmitter emitter) {
         validateRequest(dto); // POST /chat/message 的入口校验，后续流程默认 msg 可用。
+        log.info("[ChatMessage] route: /chat/message"); // 明确前端真实聊天页当前走 POST /chat/message。
+        log.info("[ChatMessage] current answer mode: {}", answerMode); // 打印当前配置的回答模式，确认前端聊天页实际走哪条链路。
+        log.info("[ChatMessage] user id: {}", userId); // 打印当前用户，确认后续历史和 Milvus 检索按用户隔离。
+        log.info("[ChatMessage] raw user message: {}", dto.getMsg()); // 打印未经多轮拼接的用户原始输入。
 
         LocalDateTime now = LocalDateTime.now();
         Conversation conversation = resolveConversation(dto, userId, now); // 无会话则新建，有会话则校验归属后复用。
+        log.info("[ChatMessage] conversation id: {}", conversation.getId()); // 打印真实会话 ID，便于确认新会话创建或旧会话复用。
 
         // 读取最近历史，构造多轮问题。
         List<ChatMessage> historyMessages = queryRecentHistory(conversation.getId(), userId);
         String multiTurnQuestion = buildMultiTurnQuestion(dto.getMsg(), historyMessages); // 把最近历史拼入当前问题，补足代词和上下文依赖。
+        log.info("[ChatMessage] multi turn question: {}", multiTurnQuestion); // 打印多轮拼接后的问题，便于确认旧链路如何进入 RAG。
 
         // 用户消息先落库，AI回复生成完成后再落库。
         saveMessage(conversation.getId(), userId, ROLE_USER, dto.getMsg(), now);
 
+        log.info("[ChatMessage] configured answer mode: {}", answerMode); // 打印配置文件中的回答模式，确认当前默认仍是 legacy。
+        if ("tool-calling".equalsIgnoreCase(answerMode)) { // 配置为 tool-calling 时切换到新的 Tool Calling 完整答案链路。
+            log.info("[ChatMessage] use ToolCallingChatService: true"); // 标记当前 /chat/message 已实际调用 ToolCallingChatService。
+            log.info("[ChatMessage] answer mode: tool-calling"); // 明确当前分支为 tool-calling。
+            log.info("[ChatMessage] multi turn question: {}", multiTurnQuestion); // 再次打印传给 Tool Calling 的多轮问题，方便定位工具调用输入。
+            String answer = toolCallingChatService.chat(multiTurnQuestion); // 调用公共 Tool Calling 编排器，由模型决定是否调用 ragSearch。
+            sendFullAnswer(answer, conversation.getId(), userId, emitter); // Tool Calling 返回完整答案后，通过 SSE 一次性推给前端并保存 assistant 消息。
+            return; // tool-calling 分支已完成本轮响应，避免继续执行 legacy 流式分支。
+        }
+        log.info("[ChatMessage] use legacy answer mode"); // 默认模式下明确使用 legacy 链路。
+        log.info("[ChatMessage] use legacy buildFinalPrompt: true"); // legacy 分支仍调用 buildFinalPrompt 主动拼 RAG Prompt。
+        log.info("[ChatMessage] use streamingChatLanguageModel: true"); // legacy 分支仍由 streamingChatLanguageModel 进行 SSE token 输出。
+        // 当前仍是旧 RAG + SSE 流式链路：
+        // 后端主动调用 buildFinalPrompt 做 Milvus 检索并拼接 Prompt，
+        // 再使用 streamingChatLanguageModel 进行流式输出。
+        // 后续第 3.5.4 会通过配置切换到 ToolCallingChatService。
         String finalPrompt = agentService.buildFinalPrompt(multiTurnQuestion); // 多轮问题进入 RAG：先 embedding 检索，再选择纯聊天或 RAG Prompt。
         streamAnswer(finalPrompt, conversation.getId(), userId, emitter);
     }
@@ -123,6 +155,29 @@ public class ChatMessageServiceImpl implements ChatMessageService {
                 sendError(emitter, error);
             }
         });
+    }
+
+    private void sendFullAnswer(String answer, Long conversationId, Long userId, SseEmitter emitter) {
+        try {
+            log.info("[ChatMessage] send full answer by SSE"); // 标记当前走完整答案一次性推送，后续切换 ToolCallingChatService 时用于排查链路。
+            log.info("[ChatMessage] full answer length: {}", answer == null ? 0 : answer.length()); // 打印完整回答长度，便于判断是否拿到模型最终结果。
+            Map<String, String> data = new HashMap<>(); // 沿用当前 SSE message 事件的数据结构，前端无需改解析逻辑。
+            data.put("content", answer); // 将完整回答作为一次 message 内容发送给前端。
+            emitter.send(SseEmitter.event().name("message").data(data)); // 通过 SSE 推送完整回答，兼容前端现有 message 事件监听。
+
+            log.info("[ChatMessage] save assistant message after full answer"); // 标记完整回答发送后开始保存 assistant 消息。
+            saveMessage(conversationId, userId, ROLE_ASSISTANT, answer, LocalDateTime.now()); // 完整答案模式下仍保存 assistant 消息，保证聊天历史可追溯。
+            updateConversationTime(conversationId, userId); // 回复完成后刷新会话更新时间，保持会话列表排序正确。
+
+            Map<String, Object> doneData = new HashMap<>(); // done 事件携带 conversationId，保持和流式完成事件一致。
+            doneData.put("conversationId", conversationId); // 返回会话 ID，前端新会话首轮发送后可拿到真实会话。
+            log.info("[ChatMessage] send done event after full answer"); // 标记完整答案模式准备发送 done 事件。
+            emitter.send(SseEmitter.event().name("done").data(doneData)); // 通知前端本轮回答结束，前端可关闭加载状态。
+
+            emitter.complete(); // 正常结束 SSE 连接。
+        } catch (Exception e) {
+            emitter.completeWithError(e); // 任意异常都交给 SSE 错误通道，避免连接悬挂。
+        }
     }
 
     private void validateRequest(ChatRequestDTO dto) {

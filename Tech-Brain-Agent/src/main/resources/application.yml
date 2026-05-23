@@ -68,3 +68,7 @@ milvus:
   port: 19530
   collection-name: article_vector
   dimension: 512
+
+chat:
+  message:
+    answer-mode: tool-calling # /chat/message 当前切到 Tool Calling 完整答案链路；需要回退时改为 legacy。
