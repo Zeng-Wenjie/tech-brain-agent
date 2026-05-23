@@ -80,10 +80,11 @@ public class ChatMessageServiceImpl implements ChatMessageService {
 
     private void doSendMessage(ChatRequestDTO dto, Long userId, SseEmitter emitter) {
         validateRequest(dto); // POST /chat/message 的入口校验，后续流程默认 msg 可用。
+        String rawUserMessage = dto.getMsg(); // 当前轮用户原始输入，Tool Calling 工具路由只允许基于它判断，不能被历史消息污染。
         log.info("[ChatMessage] route: /chat/message"); // 明确前端真实聊天页当前走 POST /chat/message。
         log.info("[ChatMessage] current answer mode: {}", answerMode); // 打印当前配置的回答模式，确认前端聊天页实际走哪条链路。
         log.info("[ChatMessage] user id: {}", userId); // 打印当前用户，确认后续历史和 Milvus 检索按用户隔离。
-        log.info("[ChatMessage] raw user message: {}", dto.getMsg()); // 打印未经多轮拼接的用户原始输入。
+        log.info("[ChatMessage] raw user message: {}", rawUserMessage); // 打印未经多轮拼接的用户原始输入。
 
         LocalDateTime now = LocalDateTime.now();
         Conversation conversation = resolveConversation(dto, userId, now); // 无会话则新建，有会话则校验归属后复用。
@@ -91,23 +92,23 @@ public class ChatMessageServiceImpl implements ChatMessageService {
 
         // 读取最近历史，构造多轮问题。
         List<ChatMessage> historyMessages = queryRecentHistory(conversation.getId(), userId);
-        String multiTurnQuestion = buildMultiTurnQuestion(dto.getMsg(), historyMessages); // 把最近历史拼入当前问题，补足代词和上下文依赖。
+        String multiTurnQuestion = buildMultiTurnQuestion(rawUserMessage, historyMessages); // 把最近历史拼入当前问题，补足代词和上下文依赖。
         log.info("[ChatMessage] multi turn question: {}", multiTurnQuestion); // 打印多轮拼接后的问题，便于确认旧链路如何进入 RAG。
 
         // 用户消息先落库，AI回复生成完成后再落库。
-        saveMessage(conversation.getId(), userId, ROLE_USER, dto.getMsg(), now);
+        saveMessage(conversation.getId(), userId, ROLE_USER, rawUserMessage, now);
 
         log.info("[ChatMessage] configured answer mode: {}", answerMode); // 打印配置文件中的回答模式，确认当前默认仍是 legacy。
         if ("tool-calling".equalsIgnoreCase(answerMode)) { // 配置为 tool-calling 时切换到新的 Tool Calling 完整答案链路。
             log.info("[ChatMessage] use ToolCallingChatService.chatStream: true"); // 标记当前 /chat/message 已实际调用 Tool Calling 流式编排器。
             log.info("[ChatMessage] answer mode: tool-calling-stream"); // 明确当前分支为 Tool Calling 流式输出。
-            log.info("[ChatMessage] multi turn question: {}", multiTurnQuestion); // 再次打印传给 Tool Calling 的多轮问题，方便定位工具调用输入。
+            log.info("[ChatMessage] tool-calling raw user message: {}", rawUserMessage); // Tool Calling 暂不接正式多轮，只用当前轮原始输入做工具路由。
+            log.info("[ChatMessage] multi turn question only for legacy: {}", multiTurnQuestion); // 多轮拼接只保留给 legacy 分支，避免历史关键词误触发强制RAG。
             StringBuilder fullAnswer = new StringBuilder(); // Tool Calling 流式 token 先在内存聚合，完成后一次性保存 assistant 消息。
-            toolCallingChatService.chatStream(multiTurnQuestion, new ToolCallingStreamCallback() { // 调用公共 Tool Calling 流式编排器，由模型决定是否调用 ragSearch。
+            toolCallingChatService.chatStream(rawUserMessage, new ToolCallingStreamCallback() { // 调用公共 Tool Calling 流式编排器，工具路由只基于当前轮输入。
                 @Override
                 public void onToken(String token) { // 收到最终回答的增量 token。
                     try {
-                        log.info("[ChatMessage] stream token received"); // 只记录收到 token，不打印具体内容，避免日志过长。
                         fullAnswer.append(token); // 累积完整 assistant 回复，完成后写入 chat_message。
                         Map<String, String> data = new HashMap<>(); // 沿用当前 SSE message 事件数据结构，前端无需改造。
                         data.put("content", token); // 每次只发送增量 token，恢复前端逐 token 流式显示。
