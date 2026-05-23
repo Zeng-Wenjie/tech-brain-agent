@@ -10,4 +10,6 @@ package com.agent.toolcalling.core; // Tool Calling公共编排服务包。
 public interface ToolCallingChatService { // 公共Tool Calling聊天编排接口。
 
     String chat(String message); // 接收用户原始问题并返回最终自然语言回答。
+
+    void chatStream(String message, ToolCallingStreamCallback callback); // 接收用户问题并以流式回调输出最终回答。
 }
