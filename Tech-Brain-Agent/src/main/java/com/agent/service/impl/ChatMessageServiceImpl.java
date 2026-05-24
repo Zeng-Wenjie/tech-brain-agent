@@ -2,6 +2,7 @@ package com.agent.service.impl;
 
 import com.agent.entity.ChatMessage;
 import com.agent.entity.Conversation;
+import com.agent.entity.ConversationMemory;
 import com.agent.entity.dto.ChatRequestDTO;
 import com.agent.mapper.ChatMessageMapper;
 import com.agent.mapper.ConversationMapper;
@@ -33,12 +34,11 @@ import java.util.concurrent.CompletableFuture;
  * <p>适用范围：处理用户在正式聊天页发送的一轮消息，包括会话归属校验、用户消息落库、Tool Calling
  * 流式回调转发、assistant 完整消息保存和 conversation 更新时间刷新。</p>
  * <p>当前主调用链：ChatMessageController -> ChatMessageServiceImpl
- * -> ToolCallingChatService.chatStream(rawUserMessage, toolHistoryMessages, callback) -> ToolRegistry/RagSearchTool
+ * -> ToolCallingChatService.chatStream(rawUserMessage, memorySummary, toolHistoryMessages, callback) -> ToolRegistry/RagSearchTool
  * -> Milvus -> DeepSeek stream -> SSE token 返回前端。</p>
- * <p>多轮上下文当前处于 4.3 阶段：本类结构化读取最近历史消息，转换为ToolChatHistoryMessage后传给ToolCallingChatService，
- * 但仍不拼接multiTurnQuestion，工具强制路由和RAG query仍只基于当前轮rawUserMessage。</p>
- * <p>长期记忆当前处于 4.6.2 阶段：assistant 完整回复保存、conversation 更新时间刷新、SSE done 完成后，
- * 调用 ConversationMemoryService 写入 conversation_memory 摘要；长期记忆本步骤不参与模型回答。</p>
+ * <p>多轮上下文当前处于 4.6.3 阶段：本类读取 conversation_memory.summary 作为长期记忆摘要，同时读取最近短期历史并转换为ToolChatHistoryMessage，
+ * 两者都只作为最终回答上下文传给ToolCallingChatService，不拼接multiTurnQuestion，不参与force ragSearch和RAG query。</p>
+ * <p>长期记忆写入仍在 assistant 完整回复保存、conversation 更新时间刷新、SSE done 完成后执行，不阻塞前端完成事件。</p>
  */
 @Slf4j
 @Service
@@ -97,13 +97,14 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         logHistoryMessages(historyMessages); // 打印历史数量和 preview，便于验证结构化历史读取能力。
         List<ToolChatHistoryMessage> toolHistoryMessages = convertToToolHistoryMessages(historyMessages); // 转换为Tool Calling专用历史模型，不做字符串拼接。
         logToolHistoryMessages(toolHistoryMessages); // 打印Tool历史数量和preview，便于验证4.3历史传入能力。
+        String memorySummary = loadMemorySummary(conversation.getId(), userId); // 读取会话长期记忆摘要，失败时返回空字符串，不影响聊天主流程。
 
         saveMessage(conversation.getId(), userId, ROLE_USER, rawUserMessage, now); // 用户消息先落库，assistant 消息在流式完成后落库。
 
         log.info("[ChatMessage] use ToolCallingChatService.chatStream: true"); // 标记当前 /chat/message 已实际调用 Tool Calling 流式编排器。
         log.info("[ChatMessage] tool-calling raw user message: {}", rawUserMessage); // Tool Calling当前轮输入仍然只使用原始用户消息。
         StringBuilder fullAnswer = new StringBuilder(); // 流式 token 先在内存聚合，完成后一次性保存 assistant 消息。
-        toolCallingChatService.chatStream(rawUserMessage, toolHistoryMessages, new ToolCallingStreamCallback() { // 传入结构化历史，禁止恢复multiTurnQuestion。
+        toolCallingChatService.chatStream(rawUserMessage, memorySummary, toolHistoryMessages, new ToolCallingStreamCallback() { // 传入长期记忆和结构化历史，禁止恢复multiTurnQuestion。
             @Override
             public void onToken(String token) { // 收到最终回答的增量 token。
                 try {
@@ -240,11 +241,33 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         }
     }
 
+    private String loadMemorySummary(Long conversationId, Long userId) {
+        try { // 长期记忆读取失败不能影响 /chat/message 主链路。
+            ConversationMemory memory = conversationMemoryService.getByConversationAndUser(conversationId, userId); // 按会话和用户读取已存在的长期记忆，不主动创建。
+            String memorySummary = memory == null ? "" : memory.getSummary(); // 没有 memory 记录时使用空字符串。
+            logMemorySummary(memorySummary); // 打印长期记忆读取状态和短preview。
+            return memorySummary == null ? "" : memorySummary; // 传给ToolCalling前兜底为非null字符串。
+        } catch (Exception e) {
+            log.warn("[ChatContext] load memory summary failed, conversationId: {}, userId: {}", conversationId, userId, e); // 读取失败只打印warn。
+            logMemorySummary(""); // 失败时明确打印未启用长期记忆。
+            return ""; // 使用空长期记忆继续当前聊天。
+        }
+    }
+
+    private void logMemorySummary(String memorySummary) {
+        boolean loaded = memorySummary != null && !memorySummary.trim().isEmpty(); // summary 非空才视为成功加载。
+        String normalizedSummary = memorySummary == null ? "" : memorySummary.trim(); // 日志长度和preview使用trim后的内容。
+        log.info("[ChatContext] memory summary loaded: {}", loaded); // 打印长期记忆是否可用。
+        log.info("[ChatContext] memory summary length: {}", normalizedSummary.length()); // 打印长期记忆长度。
+        log.info("[ChatContext] memory summary preview: {}", previewContent(normalizedSummary)); // 只打印80字以内预览。
+    }
+
     private String previewContent(String content) {
         if (content == null) {
             return "";
         }
-        return content.length() <= 80 ? content : content.substring(0, 80) + "..."; // 只保留前 80 字作为日志预览。
+        String normalizedContent = content.replace('\n', ' ').replace('\r', ' '); // 日志预览去掉换行，保持单行可读。
+        return normalizedContent.length() <= 80 ? normalizedContent : normalizedContent.substring(0, 80) + "..."; // 只保留前 80 字作为日志预览。
     }
 
     private void updateConversationTime(Long conversationId, Long userId) {
