@@ -6,6 +6,7 @@ import com.agent.entity.dto.ChatRequestDTO;
 import com.agent.mapper.ChatMessageMapper;
 import com.agent.mapper.ConversationMapper;
 import com.agent.service.ChatMessageService;
+import com.agent.toolcalling.core.ToolChatHistoryMessage;
 import com.agent.toolcalling.core.ToolCallingChatService;
 import com.agent.toolcalling.core.ToolCallingStreamCallback;
 import com.agent.utils.UserContext;
@@ -33,8 +34,8 @@ import java.util.concurrent.CompletableFuture;
  * <p>当前主调用链：ChatMessageController -> ChatMessageServiceImpl
  * -> ToolCallingChatService.chatStream(rawUserMessage, callback) -> ToolRegistry/RagSearchTool
  * -> Milvus -> DeepSeek stream -> SSE token 返回前端。</p>
- * <p>多轮上下文当前处于 4.1 阶段：本类只结构化读取最近历史消息并打印日志，不拼接
- * multiTurnQuestion，不把历史传给 ToolCallingChatService，模型调用仍只使用当前轮 rawUserMessage。</p>
+ * <p>多轮上下文当前处于 4.2 阶段：本类只结构化读取最近历史消息，转换为ToolChatHistoryMessage并打印日志，
+ * 不拼接multiTurnQuestion，不把历史传给ToolCallingChatService，模型调用仍只使用当前轮rawUserMessage。</p>
  */
 @Slf4j
 @Service
@@ -43,7 +44,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     private static final String ROLE_USER = "user";
     private static final String ROLE_ASSISTANT = "assistant";
     private static final int TITLE_MAX_LENGTH = 20;
-    private static final int HISTORY_CONTEXT_LIMIT = 6; // 4.1 阶段只读取最近 6 条结构化历史，暂不参与模型调用。
+    private static final int HISTORY_CONTEXT_LIMIT = 6; // 4.2 阶段只读取并转换最近 6 条结构化历史，暂不参与模型调用。
     private static final long SSE_TIMEOUT = 120000L; // SSE 连接最长等待时间，给 DeepSeek 流式生成保留足够窗口。
 
     @Autowired
@@ -88,6 +89,8 @@ public class ChatMessageServiceImpl implements ChatMessageService {
 
         List<ChatMessage> historyMessages = loadRecentHistoryMessages(conversation.getId(), userId); // 仅结构化读取历史，本步骤不传给模型。
         logHistoryMessages(historyMessages); // 打印历史数量和 preview，便于验证 4.1 上下文读取能力。
+        List<ToolChatHistoryMessage> toolHistoryMessages = convertToToolHistoryMessages(historyMessages); // 转换为Tool Calling专用历史模型，暂不传给编排器。
+        logToolHistoryMessages(toolHistoryMessages); // 打印Tool历史数量和preview，便于验证4.2转换能力。
 
         saveMessage(conversation.getId(), userId, ROLE_USER, rawUserMessage, now); // 用户消息先落库，assistant 消息在流式完成后落库。
 
@@ -191,12 +194,41 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         return ROLE_USER.equals(role) || ROLE_ASSISTANT.equals(role); // 历史上下文只允许普通用户消息和 assistant 回复。
     }
 
+    private List<ToolChatHistoryMessage> convertToToolHistoryMessages(List<ChatMessage> historyMessages) {
+        if (historyMessages == null || historyMessages.isEmpty()) {
+            return Collections.emptyList(); // 没有历史时直接返回空列表，不影响当前主流程。
+        }
+
+        List<ToolChatHistoryMessage> toolHistoryMessages = new ArrayList<>(); // 创建新列表，避免修改原始ChatMessage历史集合。
+        for (ChatMessage historyMessage : historyMessages) {
+            if (historyMessage == null
+                    || !isHistoryRole(historyMessage.getRole())
+                    || historyMessage.getContent() == null
+                    || historyMessage.getContent().trim().isEmpty()) {
+                continue; // 转换阶段再次兜底过滤非法role和空content。
+            }
+            toolHistoryMessages.add(ToolChatHistoryMessage.builder()
+                    .role(historyMessage.getRole())
+                    .content(historyMessage.getContent())
+                    .createTime(historyMessage.getCreateTime())
+                    .build()); // 按原顺序转换为Tool Calling公共历史消息模型。
+        }
+        return toolHistoryMessages;
+    }
+
     private void logHistoryMessages(List<ChatMessage> historyMessages) {
         log.info("[ChatContext] load recent history messages"); // 每次 /chat/message 请求都打印历史读取入口日志。
         log.info("[ChatContext] history limit: {}", HISTORY_CONTEXT_LIMIT); // 固定输出当前历史窗口大小，方便验收确认。
         log.info("[ChatContext] history message count: {}", historyMessages.size()); // 打印最终过滤并正序排列后的历史数量。
         for (ChatMessage message : historyMessages) {
             log.info("[ChatContext] history item role: {}, content preview: {}", message.getRole(), previewContent(message.getContent())); // 单条 preview 限制长度，避免日志过大。
+        }
+    }
+
+    private void logToolHistoryMessages(List<ToolChatHistoryMessage> toolHistoryMessages) {
+        log.info("[ChatContext] tool history message count: {}", toolHistoryMessages.size()); // 打印转换后的Tool Calling历史数量。
+        for (ToolChatHistoryMessage message : toolHistoryMessages) {
+            log.info("[ChatContext] tool history item role: {}, content preview: {}", message.getRole(), previewContent(message.getContent())); // Tool历史preview同样限制长度。
         }
     }
 
