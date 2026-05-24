@@ -6,6 +6,7 @@ import com.agent.entity.dto.ChatRequestDTO;
 import com.agent.mapper.ChatMessageMapper;
 import com.agent.mapper.ConversationMapper;
 import com.agent.service.ChatMessageService;
+import com.agent.service.ConversationMemoryService;
 import com.agent.toolcalling.core.ToolChatHistoryMessage;
 import com.agent.toolcalling.core.ToolCallingChatService;
 import com.agent.toolcalling.core.ToolCallingStreamCallback;
@@ -36,6 +37,8 @@ import java.util.concurrent.CompletableFuture;
  * -> Milvus -> DeepSeek stream -> SSE token 返回前端。</p>
  * <p>多轮上下文当前处于 4.3 阶段：本类结构化读取最近历史消息，转换为ToolChatHistoryMessage后传给ToolCallingChatService，
  * 但仍不拼接multiTurnQuestion，工具强制路由和RAG query仍只基于当前轮rawUserMessage。</p>
+ * <p>长期记忆当前处于 4.6.2 阶段：assistant 完整回复保存、conversation 更新时间刷新、SSE done 完成后，
+ * 调用 ConversationMemoryService 写入 conversation_memory 摘要；长期记忆本步骤不参与模型回答。</p>
  */
 @Slf4j
 @Service
@@ -55,6 +58,9 @@ public class ChatMessageServiceImpl implements ChatMessageService {
 
     @Autowired
     private ToolCallingChatService toolCallingChatService; // /chat/message 唯一正式编排器，负责 Tool Calling 与 DeepSeek 流式输出。
+
+    @Autowired
+    private ConversationMemoryService conversationMemoryService; // assistant 回复完成后异步线程内更新 conversation_memory 长期记忆。
 
     @Override
     public SseEmitter sendMessage(ChatRequestDTO dto) {
@@ -123,7 +129,9 @@ public class ChatMessageServiceImpl implements ChatMessageService {
                     emitter.complete(); // 正常结束 SSE 连接。
                 } catch (Exception e) {
                     sendError(emitter, e); // 保存消息或发送 done 失败时走统一错误事件。
+                    return; // 主流程失败时不更新长期记忆，避免记录不完整回答。
                 }
+                updateConversationMemoryAfterAnswer(conversation.getId(), userId, rawUserMessage, fullAnswer.toString()); // SSE完成后再更新长期记忆，避免阻塞前端done。
             }
 
             @Override
@@ -244,6 +252,21 @@ public class ChatMessageServiceImpl implements ChatMessageService {
                 .eq(Conversation::getId, conversationId)
                 .eq(Conversation::getUserId, userId)
                 .set(Conversation::getUpdateTime, LocalDateTime.now()));
+    }
+
+    private void updateConversationMemoryAfterAnswer(Long conversationId,
+                                                     Long userId,
+                                                     String rawUserMessage,
+                                                     String assistantAnswer) {
+        try { // 长期记忆写入失败不能影响已经完成的前端聊天结果。
+            log.info("[ChatMessage] update conversation memory after assistant answer"); // 标记 assistant 回复完成后的长期记忆更新入口。
+            log.info("[ChatMessage] conversation memory update submitted"); // 标记已提交给 ConversationMemoryService 处理。
+            conversationMemoryService.updateMemoryAfterChat(conversationId, userId, rawUserMessage, assistantAnswer); // 只传当前原始输入和完整助手回复，不传历史拼接字符串。
+            log.info("[ChatMessage] conversation memory update done"); // 标记长期记忆更新调用完成。
+        } catch (Exception e) {
+            log.warn("[ChatMessage] conversation memory update failed, conversationId: {}, userId: {}, error: {}",
+                    conversationId, userId, e.getMessage(), e); // 兜底捕获，避免长期记忆异常向外扩散。
+        }
     }
 
     private String buildTitle(String msg) {
