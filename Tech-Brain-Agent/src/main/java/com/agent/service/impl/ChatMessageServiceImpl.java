@@ -32,10 +32,10 @@ import java.util.concurrent.CompletableFuture;
  * <p>适用范围：处理用户在正式聊天页发送的一轮消息，包括会话归属校验、用户消息落库、Tool Calling
  * 流式回调转发、assistant 完整消息保存和 conversation 更新时间刷新。</p>
  * <p>当前主调用链：ChatMessageController -> ChatMessageServiceImpl
- * -> ToolCallingChatService.chatStream(rawUserMessage, callback) -> ToolRegistry/RagSearchTool
+ * -> ToolCallingChatService.chatStream(rawUserMessage, toolHistoryMessages, callback) -> ToolRegistry/RagSearchTool
  * -> Milvus -> DeepSeek stream -> SSE token 返回前端。</p>
- * <p>多轮上下文当前处于 4.2 阶段：本类只结构化读取最近历史消息，转换为ToolChatHistoryMessage并打印日志，
- * 不拼接multiTurnQuestion，不把历史传给ToolCallingChatService，模型调用仍只使用当前轮rawUserMessage。</p>
+ * <p>多轮上下文当前处于 4.3 阶段：本类结构化读取最近历史消息，转换为ToolChatHistoryMessage后传给ToolCallingChatService，
+ * 但仍不拼接multiTurnQuestion，工具强制路由和RAG query仍只基于当前轮rawUserMessage。</p>
  */
 @Slf4j
 @Service
@@ -44,7 +44,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     private static final String ROLE_USER = "user";
     private static final String ROLE_ASSISTANT = "assistant";
     private static final int TITLE_MAX_LENGTH = 20;
-    private static final int HISTORY_CONTEXT_LIMIT = 6; // 4.2 阶段只读取并转换最近 6 条结构化历史，暂不参与模型调用。
+    private static final int HISTORY_CONTEXT_LIMIT = 6; // 4.3 阶段读取并转换最近 6 条结构化历史，供Tool Calling最终回答阶段使用。
     private static final long SSE_TIMEOUT = 120000L; // SSE 连接最长等待时间，给 DeepSeek 流式生成保留足够窗口。
 
     @Autowired
@@ -87,17 +87,17 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         Conversation conversation = resolveConversation(dto, userId, now); // 无会话则新建，有会话则校验归属后复用。
         log.info("[ChatMessage] conversation id: {}", conversation.getId()); // 打印真实会话 ID，便于确认新会话创建或旧会话复用。
 
-        List<ChatMessage> historyMessages = loadRecentHistoryMessages(conversation.getId(), userId); // 仅结构化读取历史，本步骤不传给模型。
-        logHistoryMessages(historyMessages); // 打印历史数量和 preview，便于验证 4.1 上下文读取能力。
-        List<ToolChatHistoryMessage> toolHistoryMessages = convertToToolHistoryMessages(historyMessages); // 转换为Tool Calling专用历史模型，暂不传给编排器。
-        logToolHistoryMessages(toolHistoryMessages); // 打印Tool历史数量和preview，便于验证4.2转换能力。
+        List<ChatMessage> historyMessages = loadRecentHistoryMessages(conversation.getId(), userId); // 保存本轮消息前读取历史，避免包含当前user输入。
+        logHistoryMessages(historyMessages); // 打印历史数量和 preview，便于验证结构化历史读取能力。
+        List<ToolChatHistoryMessage> toolHistoryMessages = convertToToolHistoryMessages(historyMessages); // 转换为Tool Calling专用历史模型，不做字符串拼接。
+        logToolHistoryMessages(toolHistoryMessages); // 打印Tool历史数量和preview，便于验证4.3历史传入能力。
 
         saveMessage(conversation.getId(), userId, ROLE_USER, rawUserMessage, now); // 用户消息先落库，assistant 消息在流式完成后落库。
 
         log.info("[ChatMessage] use ToolCallingChatService.chatStream: true"); // 标记当前 /chat/message 已实际调用 Tool Calling 流式编排器。
-        log.info("[ChatMessage] tool-calling raw user message: {}", rawUserMessage); // Tool Calling 暂不接旧字符串多轮拼接，只用当前轮输入。
+        log.info("[ChatMessage] tool-calling raw user message: {}", rawUserMessage); // Tool Calling当前轮输入仍然只使用原始用户消息。
         StringBuilder fullAnswer = new StringBuilder(); // 流式 token 先在内存聚合，完成后一次性保存 assistant 消息。
-        toolCallingChatService.chatStream(rawUserMessage, new ToolCallingStreamCallback() { // 调用公共 Tool Calling 流式编排器。
+        toolCallingChatService.chatStream(rawUserMessage, toolHistoryMessages, new ToolCallingStreamCallback() { // 传入结构化历史，禁止恢复multiTurnQuestion。
             @Override
             public void onToken(String token) { // 收到最终回答的增量 token。
                 try {
@@ -182,7 +182,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
                     || message.getContent() == null
                     || message.getContent().trim().isEmpty()
                     || !isHistoryRole(message.getRole())); // 只保留 user/assistant 且 content 非空的历史消息。
-            Collections.reverse(historyMessages); // 倒序查询后反转为时间正序，后续 4.2/4.3 可直接按顺序传模型。
+            Collections.reverse(historyMessages); // 倒序查询后反转为时间正序，后续可直接按顺序传模型。
             return historyMessages;
         } catch (Exception e) {
             log.warn("[ChatContext] load recent history messages failed, conversationId: {}, userId: {}", conversationId, userId, e);
