@@ -5,11 +5,13 @@ import com.agent.entity.Conversation;
 import com.agent.entity.Result;
 import com.agent.mapper.ChatMessageMapper;
 import com.agent.mapper.ConversationMapper;
+import com.agent.service.ConversationMemoryService;
 import com.agent.service.ConversationService;
 import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import jakarta.servlet.http.HttpServletResponse;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -18,6 +20,7 @@ import java.time.LocalDateTime;
 import java.util.List;
 
 @Service
+@Slf4j
 public class ConversationServiceImpl implements ConversationService {
 
     @Autowired
@@ -25,6 +28,9 @@ public class ConversationServiceImpl implements ConversationService {
 
     @Autowired
     private ChatMessageMapper chatMessageMapper; // 删除会话和查询历史时同步处理 chat_message 明细。
+
+    @Autowired
+    private ConversationMemoryService conversationMemoryService; // 删除会话时同步清理 conversation_memory 长期记忆。
 
     @Override
     public Result<Long> createConversation() {
@@ -77,7 +83,7 @@ public class ConversationServiceImpl implements ConversationService {
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class) // 删除会话和消息必须在同一事务中完成，避免只删一半产生孤儿数据。
+    @Transactional(rollbackFor = Exception.class) // 删除会话、消息和长期记忆必须在同一事务中完成，避免只删一半产生孤儿数据。
     public Result<String> deleteConversation(Long conversationId) {
         Long userId = UserContext.getUserId(); // 删除操作同样以登录用户为准，防止越权删除。
         if (conversationId == null) {
@@ -93,12 +99,17 @@ public class ConversationServiceImpl implements ConversationService {
             return Result.error(HttpServletResponse.SC_FORBIDDEN, "无权删除该会话");
         }
 
+        log.info("[Conversation] delete conversation, conversationId: {}, userId: {}", conversationId, userId); // 删除会话主流程日志，便于确认 memory 同步清理。
+
         // 先删当前用户在该会话下的消息，避免误删其他用户数据。
         chatMessageMapper.delete(new LambdaQueryWrapper<ChatMessage>()
                 .eq(ChatMessage::getConversationId, conversationId)
                 .eq(ChatMessage::getUserId, userId));
 
-        // 再删当前用户自己的会话，事务保证两步同时成功或回滚。
+        // 再删当前用户在该会话下的长期记忆，记录不存在时不报错。
+        conversationMemoryService.deleteByConversationAndUser(conversationId, userId);
+
+        // 最后删当前用户自己的会话，事务保证多表删除同时成功或回滚。
         conversationMapper.delete(new LambdaUpdateWrapper<Conversation>()
                 .eq(Conversation::getId, conversationId)
                 .eq(Conversation::getUserId, userId));

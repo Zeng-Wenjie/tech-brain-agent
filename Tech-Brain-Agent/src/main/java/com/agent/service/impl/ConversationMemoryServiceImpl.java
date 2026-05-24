@@ -21,7 +21,7 @@ import java.time.LocalDateTime;
  *
  * <p>适用场景：负责 conversation_memory 表的基础读写，以及在每轮聊天完成后调用 DeepSeek 非流式接口生成新的会话长期摘要。</p>
  * <p>当前调用链：ChatMessageServiceImpl 的 Tool Calling SSE 回答完成 -> ConversationMemoryService.updateMemoryAfterChat
- * -> ConversationMemoryServiceImpl -> DeepSeekClient.chatCompletions -> ConversationMemoryMapper -> conversation_memory 表。</p>
+ * -> ConversationMemoryServiceImpl -> DeepSeekClient.chatCompletions -> ConversationMemoryMapper -> conversation_memory 表；ConversationServiceImpl 删除会话时调用本类清理对应 memory。</p>
  * <p>边界说明：本类只写入长期记忆，不读取长期记忆参与回答；不修改数据库结构，不执行建表 SQL，不影响 /chat/message SSE 返回。</p>
  */
 @Slf4j // 输出 [ConversationMemory] 前缀日志，便于排查长期记忆读写和摘要生成行为。
@@ -155,6 +155,15 @@ public class ConversationMemoryServiceImpl implements ConversationMemoryService 
             log.warn("[ConversationMemory] update memory failed, conversationId: {}, userId: {}, error: {}",
                     conversationId, userId, e.getMessage(), e); // 长期记忆异常只记录，不向外抛出影响聊天结果。
         }
+    }
+
+    @Override // 删除指定用户指定会话的长期记忆。
+    public void deleteByConversationAndUser(Long conversationId, Long userId) {
+        validateConversationAndUser(conversationId, userId); // 删除长期记忆必须同时限定会话和用户，避免误删其它用户数据。
+        log.info("[ConversationMemory] delete memory, conversationId: {}, userId: {}", conversationId, userId); // 删除日志只打印归属 ID。
+        conversationMemoryMapper.delete(new LambdaQueryWrapper<ConversationMemory>() // 按 uk_conversation_user 对应条件删除，记录不存在时 MyBatis-Plus 返回0且不报错。
+                .eq(ConversationMemory::getConversationId, conversationId) // 限定会话 ID。
+                .eq(ConversationMemory::getUserId, userId)); // 限定用户 ID，禁止只按 conversationId 删除。
     }
 
     private ObjectNode buildMemorySummaryRequest(String oldSummary, String userMessage, String assistantAnswer) {

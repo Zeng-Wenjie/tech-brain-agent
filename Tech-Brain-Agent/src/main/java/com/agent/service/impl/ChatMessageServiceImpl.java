@@ -47,7 +47,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     private static final String ROLE_USER = "user";
     private static final String ROLE_ASSISTANT = "assistant";
     private static final int TITLE_MAX_LENGTH = 20;
-    private static final int HISTORY_CONTEXT_LIMIT = 6; // 4.3 阶段读取并转换最近 6 条结构化历史，供Tool Calling最终回答阶段使用。
+    private static final int HISTORY_CONTEXT_LIMIT = 100; // 4.3 阶段读取并转换最近 6 条结构化历史，供Tool Calling最终回答阶段使用。
     private static final long SSE_TIMEOUT = 120000L; // SSE 连接最长等待时间，给 DeepSeek 流式生成保留足够窗口。
 
     @Autowired
