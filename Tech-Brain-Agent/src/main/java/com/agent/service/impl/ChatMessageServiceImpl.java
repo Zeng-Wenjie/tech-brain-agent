@@ -9,6 +9,7 @@ import com.agent.service.ChatMessageService;
 import com.agent.toolcalling.core.ToolCallingChatService;
 import com.agent.toolcalling.core.ToolCallingStreamCallback;
 import com.agent.utils.UserContext;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -17,16 +18,23 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * 前端真实聊天入口 POST /chat/message 的业务实现。
+ * 前端正式聊天入口 {@code POST /chat/message} 的业务服务实现。
  *
- * <p>当前唯一正式链路为：ChatMessageController -> ChatMessageServiceImpl -> ToolCallingChatService.chatStream(rawUserMessage, callback)
- * -> ToolRegistry/RagSearchTool/Milvus -> DeepSeekClient.streamChatCompletions -> SSE token 返回前端。</p>
- * <p>本类只负责会话归属校验、用户消息落库、SSE token 转发、assistant 完整消息保存和 conversation 更新时间，不再保留 legacy RAG Prompt 分支。</p>
+ * <p>适用范围：处理用户在正式聊天页发送的一轮消息，包括会话归属校验、用户消息落库、Tool Calling
+ * 流式回调转发、assistant 完整消息保存和 conversation 更新时间刷新。</p>
+ * <p>当前主调用链：ChatMessageController -> ChatMessageServiceImpl
+ * -> ToolCallingChatService.chatStream(rawUserMessage, callback) -> ToolRegistry/RagSearchTool
+ * -> Milvus -> DeepSeek stream -> SSE token 返回前端。</p>
+ * <p>多轮上下文当前处于 4.1 阶段：本类只结构化读取最近历史消息并打印日志，不拼接
+ * multiTurnQuestion，不把历史传给 ToolCallingChatService，模型调用仍只使用当前轮 rawUserMessage。</p>
  */
 @Slf4j
 @Service
@@ -35,6 +43,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     private static final String ROLE_USER = "user";
     private static final String ROLE_ASSISTANT = "assistant";
     private static final int TITLE_MAX_LENGTH = 20;
+    private static final int HISTORY_CONTEXT_LIMIT = 6; // 4.1 阶段只读取最近 6 条结构化历史，暂不参与模型调用。
     private static final long SSE_TIMEOUT = 120000L; // SSE 连接最长等待时间，给 DeepSeek 流式生成保留足够窗口。
 
     @Autowired
@@ -77,6 +86,9 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         Conversation conversation = resolveConversation(dto, userId, now); // 无会话则新建，有会话则校验归属后复用。
         log.info("[ChatMessage] conversation id: {}", conversation.getId()); // 打印真实会话 ID，便于确认新会话创建或旧会话复用。
 
+        List<ChatMessage> historyMessages = loadRecentHistoryMessages(conversation.getId(), userId); // 仅结构化读取历史，本步骤不传给模型。
+        logHistoryMessages(historyMessages); // 打印历史数量和 preview，便于验证 4.1 上下文读取能力。
+
         saveMessage(conversation.getId(), userId, ROLE_USER, rawUserMessage, now); // 用户消息先落库，assistant 消息在流式完成后落库。
 
         log.info("[ChatMessage] use ToolCallingChatService.chatStream: true"); // 标记当前 /chat/message 已实际调用 Tool Calling 流式编排器。
@@ -86,7 +98,6 @@ public class ChatMessageServiceImpl implements ChatMessageService {
             @Override
             public void onToken(String token) { // 收到最终回答的增量 token。
                 try {
-                    log.info("[ChatMessage] stream token received"); // 只记录收到 token，不打印具体内容，避免日志过长。
                     fullAnswer.append(token); // 累积完整 assistant 回复，完成后写入 chat_message。
                     Map<String, String> data = new HashMap<>(); // 沿用当前 SSE message 事件数据结构，前端无需改造。
                     data.put("content", token); // 每次只发送增量 token，保持前端逐 token 流式显示。
@@ -151,6 +162,49 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         message.setContent(content);
         message.setCreateTime(createTime);
         chatMessageMapper.insert(message);
+    }
+
+    private List<ChatMessage> loadRecentHistoryMessages(Long conversationId, Long userId) {
+        try {
+            List<ChatMessage> recentMessages = chatMessageMapper.selectList(new LambdaQueryWrapper<ChatMessage>() // 先按倒序查最近历史，避免读取整段会话。
+                    .eq(ChatMessage::getConversationId, conversationId)
+                    .eq(ChatMessage::getUserId, userId)
+                    .in(ChatMessage::getRole, ROLE_USER, ROLE_ASSISTANT)
+                    .isNotNull(ChatMessage::getContent)
+                    .orderByDesc(ChatMessage::getCreateTime)
+                    .orderByDesc(ChatMessage::getId)
+                    .last("LIMIT " + HISTORY_CONTEXT_LIMIT));
+            List<ChatMessage> historyMessages = new ArrayList<>(recentMessages); // 拷贝一份列表，后续过滤和反转不影响 MyBatis 返回对象。
+            historyMessages.removeIf(message -> message == null
+                    || message.getContent() == null
+                    || message.getContent().trim().isEmpty()
+                    || !isHistoryRole(message.getRole())); // 只保留 user/assistant 且 content 非空的历史消息。
+            Collections.reverse(historyMessages); // 倒序查询后反转为时间正序，后续 4.2/4.3 可直接按顺序传模型。
+            return historyMessages;
+        } catch (Exception e) {
+            log.warn("[ChatContext] load recent history messages failed, conversationId: {}, userId: {}", conversationId, userId, e);
+            return Collections.emptyList(); // 历史读取失败不能影响当前 /chat/message 主流程。
+        }
+    }
+
+    private boolean isHistoryRole(String role) {
+        return ROLE_USER.equals(role) || ROLE_ASSISTANT.equals(role); // 历史上下文只允许普通用户消息和 assistant 回复。
+    }
+
+    private void logHistoryMessages(List<ChatMessage> historyMessages) {
+        log.info("[ChatContext] load recent history messages"); // 每次 /chat/message 请求都打印历史读取入口日志。
+        log.info("[ChatContext] history limit: {}", HISTORY_CONTEXT_LIMIT); // 固定输出当前历史窗口大小，方便验收确认。
+        log.info("[ChatContext] history message count: {}", historyMessages.size()); // 打印最终过滤并正序排列后的历史数量。
+        for (ChatMessage message : historyMessages) {
+            log.info("[ChatContext] history item role: {}, content preview: {}", message.getRole(), previewContent(message.getContent())); // 单条 preview 限制长度，避免日志过大。
+        }
+    }
+
+    private String previewContent(String content) {
+        if (content == null) {
+            return "";
+        }
+        return content.length() <= 80 ? content : content.substring(0, 80) + "..."; // 只保留前 80 字作为日志预览。
     }
 
     private void updateConversationTime(Long conversationId, Long userId) {
