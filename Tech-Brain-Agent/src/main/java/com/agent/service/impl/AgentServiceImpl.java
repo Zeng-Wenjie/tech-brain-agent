@@ -59,6 +59,14 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
 
     @Override
     public List<String> searchRagContents(String query) { // Tool Calling 专用：只做现有 Milvus 检索，不调用大模型。
+        return searchRagSegments(query).stream()
+                .map(this::buildContext) // 从metadata/text中还原知识片段，保持原ragSearch返回内容格式。
+                .filter(context -> context != null && !context.isBlank()) // 过滤空内容，避免空片段干扰模型回答。
+                .collect(Collectors.toList());
+    }
+
+    @Override
+    public List<TextSegment> searchRagSegments(String query) { // Tool Calling 专用：返回带metadata的Milvus命中片段，供工具保存top1 focus。
         Long currentUserId = UserContext.getUserId(); // 沿用原 RAG 的用户隔离策略，避免检索到其他用户笔记。
         Embedding embedding = embeddingModel.embed(query).content(); // 将工具 query 转成向量，和文章向量在 Milvus 中做相似度匹配。
 
@@ -79,8 +87,8 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
         }
 
         return relatedEmbeddings.stream()
-                .map(match -> buildContext(match.embedded())) // 复用原有 context 构造逻辑，从 metadata/text 中还原知识片段。
-                .filter(context -> context != null && !context.isBlank()) // 过滤空内容，避免空片段干扰模型回答。
+                .map(EmbeddingMatch::embedded) // 保留TextSegment，metadata中包含articleId/title/content/userId。
+                .filter(segment -> segment != null) // 过滤异常空片段，避免工具保存focus时空指针。
                 .collect(Collectors.toList());
     }
 

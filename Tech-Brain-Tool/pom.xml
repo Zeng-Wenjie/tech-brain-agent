@@ -30,6 +30,11 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot</artifactId>
         </dependency>
+        <!--Redis依赖，用于通用Tool Calling上下文在工具链路中保存会话焦点。-->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
         <!--Jackson基础依赖，后续DeepSeekClient或Tool参数解析可使用JsonNode/ObjectNode。-->
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>

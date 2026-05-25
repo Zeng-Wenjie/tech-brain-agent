@@ -11,6 +11,7 @@ import com.agent.service.ConversationMemoryService;
 import com.agent.toolcalling.core.ToolChatHistoryMessage;
 import com.agent.toolcalling.core.ToolCallingChatService;
 import com.agent.toolcalling.core.ToolCallingStreamCallback;
+import com.agent.toolcalling.context.ToolCallingRequestContext;
 import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
@@ -105,7 +106,10 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         log.info("[ChatMessage] use ToolCallingChatService.chatStream: true"); // 标记当前 /chat/message 已实际调用 Tool Calling 流式编排器。
         log.info("[ChatMessage] tool-calling raw user message: {}", rawUserMessage); // Tool Calling当前轮输入仍然只使用原始用户消息。
         StringBuilder fullAnswer = new StringBuilder(); // 流式 token 先在内存聚合，完成后一次性保存 assistant 消息。
-        toolCallingChatService.chatStream(rawUserMessage, memorySummary, toolHistoryMessages, new ToolCallingStreamCallback() { // 传入长期记忆和结构化历史，禁止恢复multiTurnQuestion。
+        ToolCallingRequestContext requestContext = new ToolCallingRequestContext(); // 构造工具执行期上下文，只供AiTool读取userId/conversationId。
+        requestContext.setUserId(userId); // 当前登录用户ID来自后端UserContext，不从前端或模型参数读取。
+        requestContext.setConversationId(conversation.getId()); // 当前会话ID用于RAG命中后保存conversation级focus。
+        toolCallingChatService.chatStream(rawUserMessage, memorySummary, toolHistoryMessages, requestContext, new ToolCallingStreamCallback() { // 传入长期记忆、结构化历史和工具上下文，禁止恢复multiTurnQuestion。
             @Override
             public void onToken(String token) { // 收到最终回答的增量 token。
                 try {
