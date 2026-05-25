@@ -5,6 +5,10 @@ import com.agent.entity.dto.SummaryRequest;
 import com.agent.entity.dto.SummaryResult;
 import com.agent.mapper.AgentMapper;
 import com.agent.service.SummaryService;
+import com.agent.toolcalling.context.ConversationFocusContext;
+import com.agent.toolcalling.context.ConversationFocusService;
+import com.agent.toolcalling.context.ToolCallingContextHolder;
+import com.agent.toolcalling.context.ToolCallingRequestContext;
 import com.agent.toolcalling.support.AbstractAiTool;
 import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
@@ -28,7 +32,7 @@ public class SummarizeArticleTool extends AbstractAiTool { // 继承公共工具
 
     private static final String TOOL_NAME = "summarizeArticle"; // 工具名称必须和 DeepSeek tool_call.function.name 一致。
 
-    private static final String TOOL_DESCRIPTION = "Summarize one of the user's notes or articles by articleId. Use this tool when the user asks to summarize a specific note, article, document, code note, or asks to extract key points or interview talking points from a specific article. The articleId is required."; // 给模型看的工具说明。
+    private static final String TOOL_DESCRIPTION = "Summarize one of the user's notes or articles. Use this tool when the user asks to summarize a specific note, article, document, code note, or asks to extract key points or interview talking points. Provide articleId when the user gives an explicit ID; if the user refers to this note, the previous note, the note just searched, or the above article without an ID, omit articleId and the backend will resolve it from the recent conversation focus."; // 给模型看的工具说明。
 
     private static final String RESULT_TYPE = "article_summary"; // 工具结果类型，供 ToolCallingChatServiceImpl 判断只输出 chatMessage。
 
@@ -36,15 +40,24 @@ public class SummarizeArticleTool extends AbstractAiTool { // 继承公共工具
 
     private static final String DEFAULT_DISPLAY_MODE = "dialog"; // summary_result 固定用于弹窗展示，默认 displayMode 为 dialog。
 
+    private static final String SOURCE_TYPE_ARTICLE = "ARTICLE"; // focus来源类型为文章时可用于补全articleId。
+
+    private static final String SOURCE_TYPE_NOTE = "NOTE"; // focus来源类型为笔记时也可用于补全articleId。
+
     private static final int PREVIEW_MAX_LENGTH = 80; // 日志 preview 最大长度，避免输出完整 summary。
 
     private final AgentMapper articleMapper; // 复用 Agent 模块当前文章 Mapper，按 articleId + userId 查询 Article。
 
     private final SummaryService summaryService; // 复用第 5.1 抽取的通用总结服务。
 
-    public SummarizeArticleTool(AgentMapper articleMapper, SummaryService summaryService) { // 构造器注入业务依赖，便于测试和避免字段注入。
+    private final ConversationFocusService conversationFocusService; // 读取当前会话最近一次RAG命中文档焦点。
+
+    public SummarizeArticleTool(AgentMapper articleMapper,
+                                SummaryService summaryService,
+                                ConversationFocusService conversationFocusService) { // 构造器注入业务依赖，便于测试和避免字段注入。
         this.articleMapper = articleMapper; // 保存 Article 查询入口。
         this.summaryService = summaryService; // 保存通用总结服务。
+        this.conversationFocusService = conversationFocusService; // 保存会话焦点服务。
     }
 
     @Override // 实现 AiTool 工具名。
@@ -60,7 +73,7 @@ public class SummarizeArticleTool extends AbstractAiTool { // 继承公共工具
     @Override // 实现 AiTool 参数 Schema。
     public ObjectNode parametersSchema() {
         ObjectNode schema = createObjectSchema(); // 创建顶层 object schema。
-        addProperty(schema, "articleId", createIntegerProperty("Article or note ID to summarize."), true); // articleId 必填。
+        addProperty(schema, "articleId", createIntegerProperty("Article or note ID to summarize. Optional when the user refers to the recent note or article from the current conversation."), false); // articleId 可选，缺失时后端尝试从conversation focus补全。
         ObjectNode summaryTypeProperty = createStringProperty("Summary type: normal, points, or interview. Default is normal."); // summaryType 可选。
         ArrayNode enumValues = objectMapper.createArrayNode(); // 构造可选枚举值，帮助模型稳定输出。
         enumValues.add("normal"); // 普通摘要。
@@ -81,7 +94,10 @@ public class SummarizeArticleTool extends AbstractAiTool { // 继承公共工具
         Long currentUserId = UserContext.getUserId(); // 用户身份只从后端 ThreadLocal 获取，不信任模型或前端参数。
         log.info("[SummarizeArticleTool] current userId: {}", currentUserId); // 打印当前用户 ID，便于验证权限隔离。
         if (articleId == null || articleId <= 0) { // articleId 缺失或非法时不查库。
-            return buildFailureResult(articleId, null, summaryType, "缺少文章 ID，无法总结。"); // 返回字段完整的结构化失败 JSON。
+            articleId = resolveArticleIdFromFocus(); // 尝试从最近RAG命中的会话焦点补全articleId。
+        }
+        if (articleId == null || articleId <= 0) { // focus也无法补全时返回友好提示。
+            return buildFailureResult(null, null, summaryType, "当前没有可总结的笔记，请先指定笔记 ID，或先通过知识库检索到一篇笔记。"); // 返回字段完整的结构化失败 JSON。
         }
 
         Article article = articleMapper.selectOne(new LambdaQueryWrapper<Article>() // 按文章 ID 和当前用户 ID 查询。
@@ -136,6 +152,47 @@ public class SummarizeArticleTool extends AbstractAiTool { // 继承公共工具
         } catch (NumberFormatException e) { // 非数字字符串属于非法参数。
             return null; // 返回 null 让 execute 输出统一缺少 ID 文案。
         }
+    }
+
+    private Long resolveArticleIdFromFocus() {
+        log.info("[SummarizeArticleTool] articleId missing, try resolve from conversation focus"); // 标记开始从Redis focus补全articleId。
+        ToolCallingRequestContext context = ToolCallingContextHolder.get(); // 读取ToolCallingChatServiceImpl在工具执行期设置的上下文。
+        if (context == null) { // 非/chat/message工具链路或旧入口没有上下文。
+            log.warn("[SummarizeArticleTool] resolve articleId from focus skipped because ToolCallingRequestContext is null"); // 只警告，不影响主流程。
+            return null; // 无法补全。
+        }
+        Long userId = context.getUserId(); // 获取当前用户ID。
+        Long conversationId = context.getConversationId(); // 获取当前会话ID。
+        if (userId == null || conversationId == null) { // 缺少Redis key所需字段。
+            log.warn("[SummarizeArticleTool] resolve articleId from focus skipped, userId: {}, conversationId: {}",
+                    userId, conversationId); // 记录缺失字段。
+            return null; // 无法补全。
+        }
+
+        ConversationFocusContext focus = conversationFocusService.getLastFocus(userId, conversationId); // 读取最近RAG命中文档焦点。
+        if (focus == null) { // 没有最近focus。
+            return null; // 无法补全。
+        }
+        if (!isArticleOrNoteFocus(focus.getSourceType())) { // 只允许ARTICLE/NOTE焦点用于文章总结。
+            log.warn("[SummarizeArticleTool] focus sourceType not supported: {}", focus.getSourceType()); // 打印不支持的来源类型。
+            return null; // 不使用其它来源类型。
+        }
+        Long sourceId = focus.getSourceId(); // 读取focus.sourceId作为articleId。
+        if (sourceId == null || sourceId <= 0) { // sourceId缺失或非法。
+            log.warn("[SummarizeArticleTool] focus sourceId invalid: {}", sourceId); // 记录非法sourceId。
+            return null; // 无法补全。
+        }
+        log.info("[SummarizeArticleTool] resolved articleId from focus: {}, title: {}",
+                sourceId, previewContent(focus.getTitle())); // 打印补全结果和标题预览。
+        return sourceId; // 返回补全后的articleId。
+    }
+
+    private boolean isArticleOrNoteFocus(String sourceType) {
+        if (sourceType == null || sourceType.trim().isEmpty()) { // 空来源类型不可信。
+            return false; // 不使用该focus。
+        }
+        String normalizedSourceType = sourceType.trim().toUpperCase(); // 统一大写比较。
+        return SOURCE_TYPE_ARTICLE.equals(normalizedSourceType) || SOURCE_TYPE_NOTE.equals(normalizedSourceType); // 仅ARTICLE/NOTE可用于总结文章。
     }
 
     private String normalizeSummaryType(String summaryType) {
