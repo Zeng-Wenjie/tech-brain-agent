@@ -34,6 +34,8 @@ public class SummarizeArticleTool extends AbstractAiTool { // 继承公共工具
 
     private static final String DEFAULT_SUMMARY_TYPE = "normal"; // summaryType 缺省值。
 
+    private static final String DEFAULT_DISPLAY_MODE = "dialog"; // summary_result 固定用于弹窗展示，默认 displayMode 为 dialog。
+
     private static final int PREVIEW_MAX_LENGTH = 80; // 日志 preview 最大长度，避免输出完整 summary。
 
     private final AgentMapper articleMapper; // 复用 Agent 模块当前文章 Mapper，按 articleId + userId 查询 Article。
@@ -79,7 +81,7 @@ public class SummarizeArticleTool extends AbstractAiTool { // 继承公共工具
         Long currentUserId = UserContext.getUserId(); // 用户身份只从后端 ThreadLocal 获取，不信任模型或前端参数。
         log.info("[SummarizeArticleTool] current userId: {}", currentUserId); // 打印当前用户 ID，便于验证权限隔离。
         if (articleId == null || articleId <= 0) { // articleId 缺失或非法时不查库。
-            return buildFailureResult(null, null, "缺少文章 ID，无法总结。"); // 返回结构化失败 JSON。
+            return buildFailureResult(articleId, null, summaryType, "缺少文章 ID，无法总结。"); // 返回字段完整的结构化失败 JSON。
         }
 
         Article article = articleMapper.selectOne(new LambdaQueryWrapper<Article>() // 按文章 ID 和当前用户 ID 查询。
@@ -87,7 +89,7 @@ public class SummarizeArticleTool extends AbstractAiTool { // 继承公共工具
                 .eq(Article::getUserId, currentUserId)); // 限定当前用户，防止越权总结他人文章。
         log.info("[SummarizeArticleTool] article found: {}", article != null); // 只打印是否找到，不打印文章内容。
         if (article == null) { // 未找到或无权限时返回统一错误。
-            return buildFailureResult(articleId, null, "未找到该文章，或当前用户无权访问。"); // 不泄露其它用户文章是否存在。
+            return buildFailureResult(articleId, null, summaryType, "未找到该文章，或当前用户无权访问。"); // 不泄露其它用户文章是否存在。
         }
 
         String title = normalizeTitle(article.getTitle()); // 标准化标题，避免错误提示里出现空标题。
@@ -95,7 +97,7 @@ public class SummarizeArticleTool extends AbstractAiTool { // 继承公共工具
         int contentLength = content == null ? 0 : content.trim().length(); // 统计正文长度，不打印正文。
         log.info("[SummarizeArticleTool] article content length: {}", contentLength); // 打印正文长度。
         if (content == null || content.trim().isEmpty()) { // 空正文无法总结。
-            return buildFailureResult(articleId, title, "《" + title + "》这篇笔记内容为空，无法总结。"); // 返回结构化失败 JSON。
+            return buildFailureResult(articleId, title, summaryType, "《" + title + "》这篇笔记内容为空，无法总结。"); // 返回字段完整的结构化失败 JSON。
         }
 
         SummaryRequest request = new SummaryRequest(); // 构造通用总结请求。
@@ -104,12 +106,13 @@ public class SummarizeArticleTool extends AbstractAiTool { // 继承公共工具
         request.setTitle(title); // 传入文章标题。
         request.setContent(content); // 传入文章正文，SummaryService 内部做长度限制。
         request.setSummaryType(summaryType); // 传入模型识别出的总结类型。
-        request.setDisplayMode("dialog"); // 后续完整 summary 通过弹窗展示，本步骤先放在工具 JSON 中。
+        request.setDisplayMode(DEFAULT_DISPLAY_MODE); // 后续完整 summary 通过弹窗展示，本步骤先放在工具 JSON 中。
 
         log.info("[SummarizeArticleTool] call SummaryService"); // 标记开始调用通用总结服务。
         SummaryResult summaryResult = summaryService.summarize(request); // 复用通用总结服务生成完整 summary 和 chatMessage。
         log.info("[SummarizeArticleTool] summary generated"); // 标记总结生成完成。
         log.info("[SummarizeArticleTool] summary preview: {}", previewContent(summaryResult.getSummary())); // 只打印 summary 短预览。
+        log.info("[SummarizeArticleTool] chatMessage: {}", summaryResult.getChatMessage()); // 打印聊天短提示，不打印完整 summary。
         return buildSuccessResult(articleId, title, summaryType, summaryResult); // 返回结构化 JSON 字符串。
     }
 
@@ -153,18 +156,20 @@ public class SummarizeArticleTool extends AbstractAiTool { // 继承公共工具
         return title.trim(); // 去掉首尾空白。
     }
 
-    private String buildFailureResult(Long articleId, String title, String chatMessage) {
+    private String buildFailureResult(Long articleId, String title, String summaryType, String chatMessage) {
         ObjectNode result = objectMapper.createObjectNode(); // 使用 ObjectNode 构造 JSON，避免手拼转义错误。
         result.put("type", RESULT_TYPE); // 写入工具结果类型。
         result.put("success", false); // 标记执行失败。
-        if (articleId != null) { // 有 articleId 时写入，缺少 ID 场景不写。
+        if (articleId != null) { // 有 articleId 时写入真实 ID。
             result.put("articleId", articleId); // 写入文章 ID。
+        } else { // 缺少 ID 时仍保留 articleId 字段，稳定事件契约。
+            result.putNull("articleId"); // 写入 null，避免前端解析时字段缺失。
         }
-        if (title != null && !title.isBlank()) { // 有标题时写入。
-            result.put("title", title); // 写入文章标题。
-        }
-        result.put("chatMessage", chatMessage); // 写入聊天气泡短提示。
+        result.put("title", title == null ? "" : title); // 失败场景标题未知时固定为空字符串。
+        result.put("summaryType", normalizeSummaryType(summaryType)); // 失败场景也固定返回 summaryType。
+        result.put("displayMode", DEFAULT_DISPLAY_MODE); // 失败场景也固定返回 displayMode。
         result.put("summary", ""); // 失败场景 summary 固定为空。
+        result.put("chatMessage", chatMessage); // 写入聊天气泡短提示。
         return result.toString(); // 返回结构化 JSON 字符串。
     }
 
@@ -175,10 +180,17 @@ public class SummarizeArticleTool extends AbstractAiTool { // 继承公共工具
         result.put("articleId", articleId); // 写入文章 ID。
         result.put("title", title); // 写入文章标题。
         result.put("summaryType", summaryType); // 写入总结类型。
-        result.put("displayMode", summaryResult.getDisplayMode()); // 写入展示方式。
-        result.put("summary", summaryResult.getSummary()); // 写入完整总结，后续 SSE summary_result 会使用。
-        result.put("chatMessage", summaryResult.getChatMessage()); // 写入聊天气泡短提示。
+        result.put("displayMode", normalizeDisplayMode(summaryResult.getDisplayMode())); // 写入展示方式，缺失时固定兜底 dialog。
+        result.put("summary", summaryResult.getSummary() == null ? "" : summaryResult.getSummary()); // 写入完整总结，后续 SSE summary_result 会使用。
+        result.put("chatMessage", summaryResult.getChatMessage() == null ? "" : summaryResult.getChatMessage()); // 写入聊天气泡短提示。
         return result.toString(); // 返回结构化 JSON 字符串。
+    }
+
+    private String normalizeDisplayMode(String displayMode) {
+        if (displayMode == null || displayMode.trim().isEmpty()) { // SummaryService 未返回 displayMode 时兜底。
+            return DEFAULT_DISPLAY_MODE; // 返回 dialog。
+        }
+        return displayMode.trim(); // 保留 SummaryService 标准化后的展示方式。
     }
 
     private String previewContent(String content) {

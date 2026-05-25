@@ -123,6 +123,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
                 try {
                     log.info("[ChatMessage] stream complete, save assistant message"); // 标记流式完成后开始保存完整 assistant 回复。
                     saveMessage(conversation.getId(), userId, ROLE_ASSISTANT, fullAnswer.toString(), LocalDateTime.now()); // 保存完整 assistant 消息，保证聊天历史完整。
+                    log.info("[ChatMessage] assistant message saved length: {}", fullAnswer.length()); // 只打印保存长度，不打印 assistant 完整内容。
                     updateConversationTime(conversation.getId(), userId); // 刷新会话更新时间，保持会话列表排序正确。
                     Map<String, Object> doneData = new HashMap<>(); // done 事件携带 conversationId，保持前端完成事件格式不变。
                     doneData.put("conversationId", conversation.getId()); // 返回真实会话 ID，兼容新会话首轮发送场景。
