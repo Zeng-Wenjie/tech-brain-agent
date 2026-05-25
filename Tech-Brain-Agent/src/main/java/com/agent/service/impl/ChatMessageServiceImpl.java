@@ -46,6 +46,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
 
     private static final String ROLE_USER = "user";
     private static final String ROLE_ASSISTANT = "assistant";
+    private static final String SUMMARY_RESULT_EVENT_NAME = "summary_result"; // summarizeArticle工具完整总结结果使用该SSE事件名发送。
     private static final int TITLE_MAX_LENGTH = 20;
     private static final int HISTORY_CONTEXT_LIMIT = 100; // 4.3 阶段读取并转换最近 6 条结构化历史，供Tool Calling最终回答阶段使用。
     private static final long SSE_TIMEOUT = 120000L; // SSE 连接最长等待时间，给 DeepSeek 流式生成保留足够窗口。
@@ -133,6 +134,19 @@ public class ChatMessageServiceImpl implements ChatMessageService {
                     return; // 主流程失败时不更新长期记忆，避免记录不完整回答。
                 }
                 updateConversationMemoryAfterAnswer(conversation.getId(), userId, rawUserMessage, fullAnswer.toString()); // SSE完成后再更新长期记忆，避免阻塞前端done。
+            }
+
+            @Override
+            public void onToolEvent(String eventName, String payloadJson) { // Tool Calling工具产生业务事件时触发，当前用于转发文章总结完整结果。
+                if (!SUMMARY_RESULT_EVENT_NAME.equals(eventName)) { // 只处理summary_result，其它未来事件保持忽略以避免影响聊天主流程。
+                    return; // 非当前业务事件不写入SSE、不写入fullAnswer。
+                }
+                try {
+                    log.info("[ChatMessage] send SSE tool event: {}", SUMMARY_RESULT_EVENT_NAME); // 只打印事件名，不打印完整summary。
+                    emitter.send(SseEmitter.event().name(SUMMARY_RESULT_EVENT_NAME).data(payloadJson)); // 发送自定义SSE事件给前端弹窗监听。
+                } catch (IOException e) {
+                    sendError(emitter, e); // 按现有SSE异常处理风格发送error并结束连接。
+                }
             }
 
             @Override
