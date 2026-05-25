@@ -3,16 +3,17 @@ package com.agent.service.impl;
 import com.agent.constant.GenerateContant;
 import com.agent.entity.Article;
 import com.agent.entity.dto.ArticleSaveDTO;
+import com.agent.entity.dto.SummaryRequest;
+import com.agent.entity.dto.SummaryResult;
 import com.agent.event.ArticleVectorSyncEvent;
 import com.agent.mapper.AgentMapper;
 import com.agent.service.AgentService;
-import com.agent.service.PromptService;
+import com.agent.service.SummaryService;
 import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
-import dev.langchain4j.model.chat.ChatLanguageModel;
 import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.store.embedding.EmbeddingMatch;
 import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
@@ -51,13 +52,10 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
     private EmbeddingStore<TextSegment> embeddingStore; // Milvus 向量库入口，存放文章向量和用于 RAG 的元数据。
 
     @Autowired
-    private ChatLanguageModel chatLanguageModel; // 同步大模型，用于文章总结这类一次性完整生成。
+    private SummaryService summaryService; // 文章/笔记总结统一复用通用 SummaryService，避免原接口重复维护模型调用逻辑。
 
     @Autowired
     private ApplicationEventPublisher eventPublisher; // 保存笔记后发布事件，让向量同步在事务提交后衔接。
-
-    @Autowired
-    private PromptService promptService; // 统一构造 Prompt，避免 RAG、纯聊天、总结模板散落在业务代码中。
 
     @Override
     public List<String> searchRagContents(String query) { // Tool Calling 专用：只做现有 Milvus 检索，不调用大模型。
@@ -120,16 +118,30 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
 
     @Override
     public String summarizeArticle(Long articleId) {
-        Long currentUserId = UserContext.getUserId();
+        Long currentUserId = UserContext.getUserId(); // 当前用户只从登录上下文读取，不能信任前端传入用户 ID。
+        log.info("[ArticleSummary] summarize article by SummaryService"); // 标记原 AI 总结按钮已切换为复用 SummaryService。
+        log.info("[ArticleSummary] articleId: {}, userId: {}", articleId, currentUserId); // 只打印文章 ID 和用户 ID，不打印正文。
         Article article = articleMapper.selectOne(new LambdaQueryWrapper<Article>()
                 .eq(Article::getId, articleId)
                 .eq(Article::getUserId, currentUserId)); // articleId 必须叠加 userId 查询，防止用 ID 越权总结别人的笔记。
+        log.info("[ArticleSummary] article found: {}", article != null); // 打印是否命中文章，避免日志泄露正文。
 
         if (article == null) {
             throw new RuntimeException("笔记不存在或无权限访问");
         }
+        if (article.getContent() == null || article.getContent().trim().isEmpty()) { // 空正文无法生成有效总结，沿用 RuntimeException 风格。
+            throw new RuntimeException("笔记内容不能为空"); // 仍由全局异常处理返回业务错误，不改变接口结构。
+        }
 
-        String prompt = promptService.buildArticleSummaryPrompt(article.getTitle(), article.getContent()); // 总结使用专用 Prompt，和聊天/RAG 的回答规则隔离。
-        return chatLanguageModel.generate(prompt);
+        SummaryRequest request = new SummaryRequest(); // 构造通用总结请求，保持原接口只返回完整 summary。
+        request.setSourceType("ARTICLE"); // 当前链路基于 Article 实体和 /article/ai/summary 路径，来源类型使用 ARTICLE。
+        request.setSourceId(articleId); // 回填来源文章 ID，供 SummaryResult 和后续工具复用。
+        request.setTitle(article.getTitle()); // 使用原文章标题，SummaryService 内部会处理空标题兜底。
+        request.setContent(article.getContent()); // 使用原文章正文，SummaryService 内部会限制长度并构造 Prompt。
+        request.setSummaryType("normal"); // 原 AI 总结按钮对应普通摘要。
+        request.setDisplayMode("dialog"); // 原前端是弹窗展示，保持 dialog 语义。
+        SummaryResult result = summaryService.summarize(request); // 复用第 5.1 抽取的通用总结服务。
+        log.info("[ArticleSummary] call SummaryService success"); // 只记录调用成功，不打印完整总结。
+        return result.getSummary(); // 原接口返回 Result<String>，弹窗仍拿完整 summary，不返回 chatMessage。
     }
 }
