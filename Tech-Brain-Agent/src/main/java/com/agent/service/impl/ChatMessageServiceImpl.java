@@ -109,6 +109,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         ToolCallingRequestContext requestContext = new ToolCallingRequestContext(); // 构造工具执行期上下文，只供AiTool读取userId/conversationId。
         requestContext.setUserId(userId); // 当前登录用户ID来自后端UserContext，不从前端或模型参数读取。
         requestContext.setConversationId(conversation.getId()); // 当前会话ID用于RAG命中后保存conversation级focus。
+        requestContext.setCurrentMessage(rawUserMessage); // 当前原始输入只给工具做focus动态匹配，不拼接历史或长期记忆。
         toolCallingChatService.chatStream(rawUserMessage, memorySummary, toolHistoryMessages, requestContext, new ToolCallingStreamCallback() { // 传入长期记忆、结构化历史和工具上下文，禁止恢复multiTurnQuestion。
             @Override
             public void onToken(String token) { // 收到最终回答的增量 token。

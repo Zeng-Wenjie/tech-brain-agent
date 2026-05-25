@@ -96,7 +96,7 @@ public class SummarizeArticleTool extends AbstractAiTool { // 继承公共工具
         Long currentUserId = UserContext.getUserId(); // 用户身份只从后端 ThreadLocal 获取，不信任模型或前端参数。
         log.info("[SummarizeArticleTool] current userId: {}", currentUserId); // 打印当前用户 ID，便于验证权限隔离。
         if (articleId == null || articleId <= 0) { // articleId 缺失或非法时不查库。
-            articleId = resolveArticleIdFromFocus(); // 尝试从最近RAG命中的会话焦点补全articleId。
+            articleId = resolveArticleIdFromFocus(); // 尝试从最近RAG命中的会话焦点history动态补全articleId。
         }
         if (articleId == null || articleId <= 0) { // focus也无法补全时返回友好提示。
             return buildFailureResult(null, null, summaryType, "当前没有可总结的笔记，请先指定笔记 ID，或先通过知识库检索到一篇笔记。"); // 返回字段完整的结构化失败 JSON。
@@ -171,7 +171,8 @@ public class SummarizeArticleTool extends AbstractAiTool { // 继承公共工具
             return null; // 无法补全。
         }
 
-        ConversationFocusContext focus = conversationFocusService.getLastFocus(userId, conversationId); // 读取最近RAG命中文档焦点。
+        String currentMessage = context.getCurrentMessage(); // 当前轮原始输入用于区分“这篇”和“之前的某篇”。
+        ConversationFocusContext focus = conversationFocusService.matchFocus(userId, conversationId, currentMessage); // 基于currentMessage动态匹配history，无法匹配时兜底latest。
         if (focus == null) { // 没有最近focus。
             return null; // 无法补全。
         }

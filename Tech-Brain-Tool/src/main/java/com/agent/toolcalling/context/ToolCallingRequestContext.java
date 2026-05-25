@@ -14,6 +14,8 @@ public class ToolCallingRequestContext { // 单次Tool Calling请求的通用上
 
     private Long conversationId; // 当前会话ID，用于保存会话级最近命中文档焦点。
 
+    private String currentMessage; // 当前轮用户原始输入，只供工具解析“这篇/之前那篇”等指代，不拼接历史或长期记忆。
+
     public Long getUserId() { // 获取当前登录用户ID。
         return userId; // 返回用户ID。
     }
@@ -28,5 +30,13 @@ public class ToolCallingRequestContext { // 单次Tool Calling请求的通用上
 
     public void setConversationId(Long conversationId) { // 设置当前会话ID。
         this.conversationId = conversationId; // 写入会话ID。
+    }
+
+    public String getCurrentMessage() { // 获取当前轮用户原始输入。
+        return currentMessage; // 返回当前消息。
+    }
+
+    public void setCurrentMessage(String currentMessage) { // 设置当前轮用户原始输入。
+        this.currentMessage = currentMessage; // 写入当前消息。
     }
 }
