@@ -9,6 +9,7 @@ import com.agent.toolcalling.context.ConversationFocusContext;
 import com.agent.toolcalling.context.ConversationFocusService;
 import com.agent.toolcalling.context.ToolCallingContextHolder;
 import com.agent.toolcalling.context.ToolCallingRequestContext;
+import com.agent.toolcalling.summary.SummaryTypeConstants;
 import com.agent.toolcalling.support.AbstractAiTool;
 import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
@@ -36,7 +37,7 @@ public class SummarizeArticleTool extends AbstractAiTool { // 继承公共工具
 
     private static final String RESULT_TYPE = "article_summary"; // 工具结果类型，供 ToolCallingChatServiceImpl 判断只输出 chatMessage。
 
-    private static final String DEFAULT_SUMMARY_TYPE = "normal"; // summaryType 缺省值。
+    private static final String DEFAULT_SUMMARY_TYPE = SummaryTypeConstants.NORMAL; // summaryType 缺省值。
 
     private static final String DEFAULT_DISPLAY_MODE = "dialog"; // summary_result 固定用于弹窗展示，默认 displayMode 为 dialog。
 
@@ -76,9 +77,9 @@ public class SummarizeArticleTool extends AbstractAiTool { // 继承公共工具
         addProperty(schema, "articleId", createIntegerProperty("Article or note ID to summarize. Optional when the user refers to the recent note or article from the current conversation."), false); // articleId 可选，缺失时后端尝试从conversation focus补全。
         ObjectNode summaryTypeProperty = createStringProperty("Summary type: normal, points, or interview. Default is normal."); // summaryType 可选。
         ArrayNode enumValues = objectMapper.createArrayNode(); // 构造可选枚举值，帮助模型稳定输出。
-        enumValues.add("normal"); // 普通摘要。
-        enumValues.add("points"); // 要点总结。
-        enumValues.add("interview"); // 面试话术。
+        enumValues.add(SummaryTypeConstants.NORMAL); // 普通摘要。
+        enumValues.add(SummaryTypeConstants.POINTS); // 要点总结。
+        enumValues.add(SummaryTypeConstants.INTERVIEW); // 面试话术。
         summaryTypeProperty.set("enum", enumValues); // 写入 JSON Schema enum。
         addProperty(schema, "summaryType", summaryTypeProperty, false); // summaryType 非必填。
         return schema; // 返回完整参数 Schema。
@@ -88,7 +89,8 @@ public class SummarizeArticleTool extends AbstractAiTool { // 继承公共工具
     public String execute(JsonNode arguments) {
         log.info("[SummarizeArticleTool] execute summarizeArticle"); // 标记工具开始执行。
         Long articleId = readArticleId(arguments); // 从模型 arguments 中读取 articleId。
-        String summaryType = normalizeSummaryType(getOptionalText(arguments, "summaryType", DEFAULT_SUMMARY_TYPE)); // 读取并标准化 summaryType。
+        String summaryType = SummaryTypeConstants.normalizeSummaryType(getOptionalText(arguments, "summaryType", DEFAULT_SUMMARY_TYPE)); // 读取并统一标准化 summaryType。
+        log.info("[SummarizeArticleTool] normalized summaryType: {}", summaryType); // 打印归一化后的 summaryType，便于和路由、SummaryService 对齐。
         log.info("[SummarizeArticleTool] articleId: {}, summaryType: {}", articleId, summaryType); // 打印工具入参，不打印正文。
 
         Long currentUserId = UserContext.getUserId(); // 用户身份只从后端 ThreadLocal 获取，不信任模型或前端参数。
@@ -196,14 +198,7 @@ public class SummarizeArticleTool extends AbstractAiTool { // 继承公共工具
     }
 
     private String normalizeSummaryType(String summaryType) {
-        if (summaryType == null || summaryType.trim().isEmpty()) { // 未提供时使用普通摘要。
-            return DEFAULT_SUMMARY_TYPE; // 返回 normal。
-        }
-        String normalizedSummaryType = summaryType.trim().toLowerCase(); // 统一小写。
-        return switch (normalizedSummaryType) { // 只允许三种总结类型。
-            case "normal", "points", "interview" -> normalizedSummaryType; // 合法值直接返回。
-            default -> DEFAULT_SUMMARY_TYPE; // 非法值兜底 normal。
-        };
+        return SummaryTypeConstants.normalizeSummaryType(summaryType); // 复用通用 summaryType 归一化规则，避免工具和服务规则漂移。
     }
 
     private String normalizeTitle(String title) {
