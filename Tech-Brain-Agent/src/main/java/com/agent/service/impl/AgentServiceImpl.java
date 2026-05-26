@@ -121,7 +121,7 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
                 article,
                 null)); // 先写 MySQL 再发事务事件，Milvus 失败不会破坏主业务数据。
 
-        log.info("保存笔记成功:{}", article);
+        log.info("[AgentService] save note success, articleId: {}, userId: {}", article.getId(), currentUserId);
     }
 
     @Override

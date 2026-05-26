@@ -90,22 +90,22 @@ public class SummarizeArticleTool extends AbstractAiTool { // 继承公共工具
         log.info("[SummarizeArticleTool] execute summarizeArticle"); // 标记工具开始执行。
         Long articleId = readArticleId(arguments); // 从模型 arguments 中读取 articleId。
         String summaryType = SummaryTypeConstants.normalizeSummaryType(getOptionalText(arguments, "summaryType", DEFAULT_SUMMARY_TYPE)); // 读取并统一标准化 summaryType。
-        log.info("[SummarizeArticleTool] normalized summaryType: {}", summaryType); // 打印归一化后的 summaryType，便于和路由、SummaryService 对齐。
+        log.debug("[SummarizeArticleTool] normalized summaryType: {}", summaryType); // 归一化细节降级为DEBUG。
         log.info("[SummarizeArticleTool] articleId: {}, summaryType: {}", articleId, summaryType); // 打印工具入参，不打印正文。
 
         Long currentUserId = UserContext.getUserId(); // 用户身份只从后端 ThreadLocal 获取，不信任模型或前端参数。
-        log.info("[SummarizeArticleTool] current userId: {}", currentUserId); // 打印当前用户 ID，便于验证权限隔离。
+        log.debug("[SummarizeArticleTool] current userId: {}", currentUserId); // 用户ID细节降级为DEBUG。
         if (articleId == null || articleId <= 0) { // articleId 缺失或非法时不查库。
             articleId = resolveArticleIdFromFocus(); // 尝试从最近RAG命中的会话焦点history动态补全articleId。
         }
         if (articleId == null || articleId <= 0) { // focus也无法补全时返回友好提示。
-            return buildFailureResult(null, null, summaryType, "当前没有可总结的笔记，请先指定笔记 ID，或先通过知识库检索到一篇笔记。"); // 返回字段完整的结构化失败 JSON。
+            return buildFailureResult(null, null, summaryType, "未找到与当前描述匹配的已检索笔记，请先通过知识库检索到对应笔记，或指定笔记 ID。"); // 返回字段完整的结构化失败 JSON。
         }
 
         Article article = articleMapper.selectOne(new LambdaQueryWrapper<Article>() // 按文章 ID 和当前用户 ID 查询。
                 .eq(Article::getId, articleId) // 限定文章 ID。
                 .eq(Article::getUserId, currentUserId)); // 限定当前用户，防止越权总结他人文章。
-        log.info("[SummarizeArticleTool] article found: {}", article != null); // 只打印是否找到，不打印文章内容。
+        log.debug("[SummarizeArticleTool] article found: {}", article != null); // 查询细节降级为DEBUG。
         if (article == null) { // 未找到或无权限时返回统一错误。
             return buildFailureResult(articleId, null, summaryType, "未找到该文章，或当前用户无权访问。"); // 不泄露其它用户文章是否存在。
         }
@@ -113,7 +113,7 @@ public class SummarizeArticleTool extends AbstractAiTool { // 继承公共工具
         String title = normalizeTitle(article.getTitle()); // 标准化标题，避免错误提示里出现空标题。
         String content = article.getContent(); // 读取文章正文。
         int contentLength = content == null ? 0 : content.trim().length(); // 统计正文长度，不打印正文。
-        log.info("[SummarizeArticleTool] article content length: {}", contentLength); // 打印正文长度。
+        log.debug("[SummarizeArticleTool] article content length: {}", contentLength); // 正文长度降级为DEBUG。
         if (content == null || content.trim().isEmpty()) { // 空正文无法总结。
             return buildFailureResult(articleId, title, summaryType, "《" + title + "》这篇笔记内容为空，无法总结。"); // 返回字段完整的结构化失败 JSON。
         }
@@ -126,11 +126,11 @@ public class SummarizeArticleTool extends AbstractAiTool { // 继承公共工具
         request.setSummaryType(summaryType); // 传入模型识别出的总结类型。
         request.setDisplayMode(DEFAULT_DISPLAY_MODE); // 后续完整 summary 通过弹窗展示，本步骤先放在工具 JSON 中。
 
-        log.info("[SummarizeArticleTool] call SummaryService"); // 标记开始调用通用总结服务。
+        log.debug("[SummarizeArticleTool] call SummaryService"); // 调用细节降级为DEBUG。
         SummaryResult summaryResult = summaryService.summarize(request); // 复用通用总结服务生成完整 summary 和 chatMessage。
         log.info("[SummarizeArticleTool] summary generated"); // 标记总结生成完成。
-        log.info("[SummarizeArticleTool] summary preview: {}", previewContent(summaryResult.getSummary())); // 只打印 summary 短预览。
-        log.info("[SummarizeArticleTool] chatMessage: {}", summaryResult.getChatMessage()); // 打印聊天短提示，不打印完整 summary。
+        log.debug("[SummarizeArticleTool] summary preview: {}", previewContent(summaryResult.getSummary())); // summary预览不能在INFO打印。
+        log.debug("[SummarizeArticleTool] chatMessage: {}", summaryResult.getChatMessage()); // 聊天短提示降级为DEBUG。
         return buildSuccessResult(articleId, title, summaryType, summaryResult); // 返回结构化 JSON 字符串。
     }
 
@@ -172,8 +172,9 @@ public class SummarizeArticleTool extends AbstractAiTool { // 继承公共工具
         }
 
         String currentMessage = context.getCurrentMessage(); // 当前轮原始输入用于区分“这篇”和“之前的某篇”。
-        ConversationFocusContext focus = conversationFocusService.matchFocus(userId, conversationId, currentMessage); // 基于currentMessage动态匹配history，无法匹配时兜底latest。
+        ConversationFocusContext focus = conversationFocusService.matchFocus(userId, conversationId, currentMessage); // 基于currentMessage动态匹配history，纯指代才允许兜底latest。
         if (focus == null) { // 没有最近focus。
+            log.info("[SummarizeArticleTool] no matched focus for current message"); // 明确目标未匹配或没有可用focus时给出关键日志。
             return null; // 无法补全。
         }
         if (!isArticleOrNoteFocus(focus.getSourceType())) { // 只允许ARTICLE/NOTE焦点用于文章总结。

@@ -51,9 +51,9 @@ public class DeepSeekClient { // DeepSeek公共HTTP调用客户端。
         try { // 捕获序列化、网络和响应解析异常。
             String requestUrl = buildChatCompletionsUrl(); // 拼接最终请求URL。
             String requestJson = objectMapper.writeValueAsString(requestBody); // 将业务层组装好的请求体序列化为JSON。
-            log.info("[DeepSeekClient] request url: {}", requestUrl); // 打印请求地址，不包含敏感信息。
-            log.info("[DeepSeekClient] model: {}", requestBody.path("model").asText()); // 打印请求体中的模型名。
-            log.info("[DeepSeekClient] thinking: {}", requestBody.path("thinking").path("type").asText()); // 打印thinking状态。
+            log.debug("[DeepSeekClient] request url: {}", requestUrl); // 请求地址每次都会出现，降级为DEBUG。
+            log.debug("[DeepSeekClient] model: {}", requestBody.path("model").asText()); // 模型名降级为DEBUG。
+            log.debug("[DeepSeekClient] thinking: {}", requestBody.path("thinking").path("type").asText()); // thinking状态降级为DEBUG。
 
             HttpRequest httpRequest = HttpRequest.newBuilder(URI.create(requestUrl)) // 创建DeepSeek POST请求。
                     .timeout(Duration.ofSeconds(resolveTimeoutSeconds())) // 设置单次请求超时。
@@ -92,9 +92,9 @@ public class DeepSeekClient { // DeepSeek公共HTTP调用客户端。
         try { // 捕获序列化、网络、SSE读取和JSON解析异常。
             String requestUrl = buildChatCompletionsUrl(); // 流式调用复用同一个chat/completions地址。
             String requestJson = objectMapper.writeValueAsString(streamRequestBody); // 将带stream=true的请求体序列化为JSON。
-            log.info("[DeepSeekClient] stream request url: {}", requestUrl); // 打印流式请求地址，不包含敏感信息。
-            log.info("[DeepSeekClient] stream model: {}", streamRequestBody.path("model").asText()); // 打印流式请求模型名。
-            log.info("[DeepSeekClient] stream thinking: {}", streamRequestBody.path("thinking").path("type").asText()); // 打印thinking状态。
+            log.debug("[DeepSeekClient] stream request url: {}", requestUrl); // 流式请求地址降级为DEBUG。
+            log.debug("[DeepSeekClient] stream model: {}", streamRequestBody.path("model").asText()); // 流式模型名降级为DEBUG。
+            log.debug("[DeepSeekClient] stream thinking: {}", streamRequestBody.path("thinking").path("type").asText()); // thinking状态降级为DEBUG。
 
             HttpRequest httpRequest = HttpRequest.newBuilder(URI.create(requestUrl)) // 创建DeepSeek流式POST请求。
                     .timeout(Duration.ofSeconds(resolveTimeoutSeconds())) // 流式请求也使用deepseek.timeout-seconds配置。
@@ -113,11 +113,11 @@ public class DeepSeekClient { // DeepSeek公共HTTP调用客户端。
                 throw error; // 继续向上抛出，避免调用方误判成功。
             }
 
-            log.info("[DeepSeekClient] stream started"); // 标记流式响应开始读取。
+            log.debug("[DeepSeekClient] stream started"); // 流式开始细节降级为DEBUG。
             boolean completed = readStreamResponse(response.body(), callback); // 逐行解析data事件并分发token。
             if (!completed) { // 如果服务端未显式返回[DONE]但流自然结束，也视为完成。
                 callback.onComplete(); // 通知调用方流已结束。
-                log.info("[DeepSeekClient] stream completed"); // 打印流结束日志。
+            log.debug("[DeepSeekClient] stream completed"); // 流式完成细节降级为DEBUG。
             }
         } catch (InterruptedException e) { // 当前线程在HTTP调用过程中被中断。
             Thread.currentThread().interrupt(); // 恢复线程中断标记。
@@ -148,7 +148,7 @@ public class DeepSeekClient { // DeepSeek公共HTTP调用客户端。
                 String data = trimmedLine.substring("data:".length()).trim(); // 去掉data:前缀得到真实负载。
                 if ("[DONE]".equals(data)) { // DeepSeek流式结束标记。
                     callback.onComplete(); // 通知调用方流式响应完成。
-                    log.info("[DeepSeekClient] stream completed"); // 打印完成日志。
+        log.debug("[DeepSeekClient] stream completed"); // 流式完成细节降级为DEBUG。
                     completed = true; // 记录已收到显式完成事件。
                     break; // 收到[DONE]后结束读取。
                 }

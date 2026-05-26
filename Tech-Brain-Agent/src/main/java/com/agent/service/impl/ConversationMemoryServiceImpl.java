@@ -123,7 +123,7 @@ public class ConversationMemoryServiceImpl implements ConversationMemoryService 
                 return; // 直接跳过，不写入 summary。
             }
             if (shouldSkipMemoryUpdate(userMessage, assistantAnswer)) {
-                log.info("[ConversationMemory] skip memory update, dirty assistant answer preview: {}",
+            log.debug("[ConversationMemory] skip memory update, dirty assistant answer preview: {}",
                         previewContent(assistantAnswer)); // 异常/拒答类回复不污染长期记忆。
                 return; // 脏回答不更新 memory。
             }
@@ -131,10 +131,10 @@ public class ConversationMemoryServiceImpl implements ConversationMemoryService 
             log.info("[ConversationMemory] update after chat, conversationId: {}, userId: {}", conversationId, userId); // 标记聊天完成后开始更新长期记忆。
             ConversationMemory memory = getOrCreate(conversationId, userId); // 读取或创建当前会话用户的长期记忆记录。
             int oldMessageCount = memory.getMessageCount() == null ? 0 : memory.getMessageCount(); // 原计数为空时兜底为 0。
-            log.info("[ConversationMemory] old message count: {}", oldMessageCount); // 打印更新前已汇总消息数。
+            log.debug("[ConversationMemory] old message count: {}", oldMessageCount); // 计数细节降级为DEBUG。
 
             ObjectNode requestBody = buildMemorySummaryRequest(memory.getSummary(), userMessage, assistantAnswer); // 用旧摘要和本轮问答构造摘要请求。
-            log.info("[ConversationMemory] summary prompt built"); // 只标记 prompt 已构造，不打印完整 prompt。
+            log.debug("[ConversationMemory] summary prompt built"); // prompt构造细节降级为DEBUG。
             JsonNode response = deepSeekClient.chatCompletions(requestBody); // 非流式调用 DeepSeek 生成新的长期摘要。
             String newSummary = normalizeSummary(readSummaryContent(response)); // 解析并限制摘要长度。
             if (isBlank(newSummary)) {
@@ -148,9 +148,9 @@ public class ConversationMemoryServiceImpl implements ConversationMemoryService 
             memory.setUpdateTime(LocalDateTime.now()); // 刷新长期记忆更新时间。
             conversationMemoryMapper.updateById(memory); // 根据主键更新 conversation_memory。
 
-            log.info("[ConversationMemory] new message count: {}", newMessageCount); // 打印更新后的消息计数。
+            log.debug("[ConversationMemory] new message count: {}", newMessageCount); // 计数细节降级为DEBUG。
             log.info("[ConversationMemory] summary updated"); // 标记 summary 已成功更新。
-            log.info("[ConversationMemory] summary preview: {}", previewContent(newSummary)); // 只打印短 preview，避免日志过长。
+            log.debug("[ConversationMemory] summary preview: {}", previewContent(newSummary)); // summary preview不能在INFO打印。
         } catch (Exception e) {
             log.warn("[ConversationMemory] update memory failed, conversationId: {}, userId: {}, error: {}",
                     conversationId, userId, e.getMessage(), e); // 长期记忆异常只记录，不向外抛出影响聊天结果。

@@ -37,7 +37,7 @@ public class ArticleVectorServiceImpl implements ArticleVectorService {
     @Override
     public void syncArticleVector(Article article) { // 新增/修改文章后同步向量，让后续 RAG 可以检索到这篇笔记。
         if (article == null || article.getId() == null) {
-            log.warn("Skip article vector sync because article or id is null: {}", article);
+            log.warn("Skip article vector sync because article or id is null");
             return;
         }
 

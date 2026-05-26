@@ -87,13 +87,13 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         validateRequest(dto); // POST /chat/message 的入口校验，后续流程默认 msg 可用。
         String rawUserMessage = dto.getMsg(); // 当前轮用户原始输入，Tool Calling 工具路由只基于它判断。
         log.info("[ChatMessage] route: /chat/message"); // 明确前端真实聊天页当前走 POST /chat/message。
-        log.info("[ChatMessage] current answer mode: tool-calling-stream"); // 清理 legacy 后固定走 Tool Calling 流式链路。
+        log.debug("[ChatMessage] current answer mode: tool-calling-stream"); // answer mode固定，降级为DEBUG。
         log.info("[ChatMessage] user id: {}", userId); // 打印当前用户，确认后续历史和 Milvus 检索按用户隔离。
-        log.info("[ChatMessage] raw user message: {}", rawUserMessage); // 打印未经多轮拼接的用户原始输入。
+        log.debug("[ChatMessage] raw user message: {}", previewContent(rawUserMessage)); // 用户原文只在DEBUG打印短preview。
 
         LocalDateTime now = LocalDateTime.now();
         Conversation conversation = resolveConversation(dto, userId, now); // 无会话则新建，有会话则校验归属后复用。
-        log.info("[ChatMessage] conversation id: {}", conversation.getId()); // 打印真实会话 ID，便于确认新会话创建或旧会话复用。
+        log.debug("[ChatMessage] conversation id: {}", conversation.getId()); // 会话ID细节降级为DEBUG。
 
         List<ChatMessage> historyMessages = loadRecentHistoryMessages(conversation.getId(), userId); // 保存本轮消息前读取历史，避免包含当前user输入。
         logHistoryMessages(historyMessages); // 打印历史数量和 preview，便于验证结构化历史读取能力。
@@ -103,8 +103,8 @@ public class ChatMessageServiceImpl implements ChatMessageService {
 
         saveMessage(conversation.getId(), userId, ROLE_USER, rawUserMessage, now); // 用户消息先落库，assistant 消息在流式完成后落库。
 
-        log.info("[ChatMessage] use ToolCallingChatService.chatStream: true"); // 标记当前 /chat/message 已实际调用 Tool Calling 流式编排器。
-        log.info("[ChatMessage] tool-calling raw user message: {}", rawUserMessage); // Tool Calling当前轮输入仍然只使用原始用户消息。
+        log.debug("[ChatMessage] use ToolCallingChatService.chatStream: true"); // 调用细节降级为DEBUG。
+        log.debug("[ChatMessage] tool-calling raw user message: {}", previewContent(rawUserMessage)); // 用户原文只在DEBUG打印短preview。
         StringBuilder fullAnswer = new StringBuilder(); // 流式 token 先在内存聚合，完成后一次性保存 assistant 消息。
         ToolCallingRequestContext requestContext = new ToolCallingRequestContext(); // 构造工具执行期上下文，只供AiTool读取userId/conversationId。
         requestContext.setUserId(userId); // 当前登录用户ID来自后端UserContext，不从前端或模型参数读取。
@@ -132,7 +132,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
                     updateConversationTime(conversation.getId(), userId); // 刷新会话更新时间，保持会话列表排序正确。
                     Map<String, Object> doneData = new HashMap<>(); // done 事件携带 conversationId，保持前端完成事件格式不变。
                     doneData.put("conversationId", conversation.getId()); // 返回真实会话 ID，兼容新会话首轮发送场景。
-                    log.info("[ChatMessage] send done event after stream"); // 标记准备发送 Tool Calling 流式 done 事件。
+                    log.debug("[ChatMessage] send done event after stream"); // done事件发送细节降级为DEBUG。
                     emitter.send(SseEmitter.event().name("done").data(doneData)); // 通知前端本轮流式回答完成。
                     emitter.complete(); // 正常结束 SSE 连接。
                 } catch (Exception e) {
@@ -246,18 +246,18 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     }
 
     private void logHistoryMessages(List<ChatMessage> historyMessages) {
-        log.info("[ChatContext] load recent history messages"); // 每次 /chat/message 请求都打印历史读取入口日志。
-        log.info("[ChatContext] history limit: {}", HISTORY_CONTEXT_LIMIT); // 固定输出当前历史窗口大小，方便验收确认。
-        log.info("[ChatContext] history message count: {}", historyMessages.size()); // 打印最终过滤并正序排列后的历史数量。
+        log.debug("[ChatContext] load recent history messages"); // 历史读取细节降级为DEBUG。
+        log.debug("[ChatContext] history limit: {}", HISTORY_CONTEXT_LIMIT); // 历史窗口大小降级为DEBUG。
+        log.debug("[ChatContext] history message count: {}", historyMessages.size()); // 历史数量降级为DEBUG。
         for (ChatMessage message : historyMessages) {
-            log.info("[ChatContext] history item role: {}, content preview: {}", message.getRole(), previewContent(message.getContent())); // 单条 preview 限制长度，避免日志过大。
+            log.debug("[ChatContext] history item role: {}, content preview: {}", message.getRole(), previewContent(message.getContent())); // 单条preview只在DEBUG打印。
         }
     }
 
     private void logToolHistoryMessages(List<ToolChatHistoryMessage> toolHistoryMessages) {
-        log.info("[ChatContext] tool history message count: {}", toolHistoryMessages.size()); // 打印转换后的Tool Calling历史数量。
+        log.debug("[ChatContext] tool history message count: {}", toolHistoryMessages.size()); // Tool历史数量降级为DEBUG。
         for (ToolChatHistoryMessage message : toolHistoryMessages) {
-            log.info("[ChatContext] tool history item role: {}, content preview: {}", message.getRole(), previewContent(message.getContent())); // Tool历史preview同样限制长度。
+            log.debug("[ChatContext] tool history item role: {}, content preview: {}", message.getRole(), previewContent(message.getContent())); // Tool历史preview只在DEBUG打印。
         }
     }
 
@@ -277,9 +277,9 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     private void logMemorySummary(String memorySummary) {
         boolean loaded = memorySummary != null && !memorySummary.trim().isEmpty(); // summary 非空才视为成功加载。
         String normalizedSummary = memorySummary == null ? "" : memorySummary.trim(); // 日志长度和preview使用trim后的内容。
-        log.info("[ChatContext] memory summary loaded: {}", loaded); // 打印长期记忆是否可用。
-        log.info("[ChatContext] memory summary length: {}", normalizedSummary.length()); // 打印长期记忆长度。
-        log.info("[ChatContext] memory summary preview: {}", previewContent(normalizedSummary)); // 只打印80字以内预览。
+        log.debug("[ChatContext] memory summary loaded: {}", loaded); // 长期记忆状态降级为DEBUG。
+        log.debug("[ChatContext] memory summary length: {}", normalizedSummary.length()); // 长期记忆长度降级为DEBUG。
+        log.debug("[ChatContext] memory summary preview: {}", previewContent(normalizedSummary)); // memory preview不能在INFO打印。
     }
 
     private String previewContent(String content) {
@@ -302,10 +302,10 @@ public class ChatMessageServiceImpl implements ChatMessageService {
                                                      String rawUserMessage,
                                                      String assistantAnswer) {
         try { // 长期记忆写入失败不能影响已经完成的前端聊天结果。
-            log.info("[ChatMessage] update conversation memory after assistant answer"); // 标记 assistant 回复完成后的长期记忆更新入口。
-            log.info("[ChatMessage] conversation memory update submitted"); // 标记已提交给 ConversationMemoryService 处理。
+            log.debug("[ChatMessage] update conversation memory after assistant answer"); // 长期记忆更新细节降级为DEBUG。
+            log.debug("[ChatMessage] conversation memory update submitted"); // 长期记忆更新细节降级为DEBUG。
             conversationMemoryService.updateMemoryAfterChat(conversationId, userId, rawUserMessage, assistantAnswer); // 只传当前原始输入和完整助手回复，不传历史拼接字符串。
-            log.info("[ChatMessage] conversation memory update done"); // 标记长期记忆更新调用完成。
+            log.debug("[ChatMessage] conversation memory update done"); // 长期记忆更新细节降级为DEBUG。
         } catch (Exception e) {
             log.warn("[ChatMessage] conversation memory update failed, conversationId: {}, userId: {}, error: {}",
                     conversationId, userId, e.getMessage(), e); // 兜底捕获，避免长期记忆异常向外扩散。
