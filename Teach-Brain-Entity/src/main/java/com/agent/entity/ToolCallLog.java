@@ -21,7 +21,7 @@ import java.time.LocalDateTime;
 @TableName("tool_call_log") // 映射数据库已存在的 tool_call_log 表。
 public class ToolCallLog { // Tool Calling 工具调用日志持久化对象。
 
-    @TableId(type = IdType.AUTO) // 主键使用数据库自增 ID。
+    @TableId(value = "id", type = IdType.AUTO) // 主键使用数据库自增 ID。
     private Long id; // tool_call_log.id。
     private String traceId; // 同一轮 Tool Calling 调用链路的追踪 ID，对应 trace_id。
     private Long conversationId; // 当前会话 ID，对应 conversation_id。
