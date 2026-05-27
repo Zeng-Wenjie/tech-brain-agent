@@ -1,27 +1,39 @@
-package com.agent.toolcalling.context; // Tool Calling通用请求上下文包。
+package com.agent.toolcalling.context;
+
+import com.agent.toolcalling.log.ToolCallLogRecorder;
 
 /**
- * Tool Calling单次请求上下文。
+ * Tool Calling 请求上下文。
  *
- * <p>适用场景：业务入口在调用ToolCallingChatService.chatStream时，把当前登录用户和会话信息放入该对象。</p>
- * <p>调用链为：ChatMessageServiceImpl构造ToolCallingRequestContext -> ToolCallingChatServiceImpl在执行AiTool前写入ToolCallingContextHolder
- * -> RagSearchTool、SummarizeArticleTool等业务工具在当前线程内读取上下文。</p>
- * <p>本类位于Tech-Brain-Tool公共模块，只承载通用上下文字段，不依赖Agent、Notes、数据库或具体业务工具。</p>
+ * <p>适用场景：承载单轮聊天请求从 ChatMessageServiceImpl 传入 ToolCallingChatServiceImpl 的上下文信息，
+ * 再通过 ToolCallingContextHolder 传递给具体 AiTool。</p>
+ * <p>调用链：ChatMessageServiceImpl 创建本对象并写入 traceId、userId、conversationId、currentMessage
+ * 和可选的 ToolCallLogRecorder；ToolCallingChatServiceImpl 在 AiTool.execute(arguments) 执行期间把本对象
+ * 写入 ToolCallingContextHolder；RagSearchTool 和 SummarizeArticleTool 再从 Holder 读取用户、会话和当前消息信息。</p>
+ * <p>边界说明：本类位于 Tech-Brain-Tool 模块，只携带公共上下文字段和日志回调接口，不依赖 Agent Service、
+ * Mapper、数据库实现或前端代码。</p>
  */
-public class ToolCallingRequestContext { // 单次Tool Calling请求的通用上下文DTO。
+public class ToolCallingRequestContext { // 单轮 Tool Calling 请求上下文。
+    private String traceId; // 同一轮聊天请求内所有工具调用共享的追踪ID。
+    private Long userId; // 当前登录用户ID，由后端 UserContext 解析得到。
+    private Long conversationId; // 当前会话ID，供工具读取上下文和维护会话焦点。
+    private String currentMessage; // 当前用户原始输入，不拼接历史或长期记忆。
+    private ToolCallLogRecorder toolCallLogRecorder; // Agent 模块传入的可选工具调用日志回调。
 
-    private Long userId; // 当前登录用户ID，由后端UserContext解析后传入，工具不得信任模型参数中的userId。
+    public String getTraceId() { // 获取当前聊天请求追踪ID。
+        return traceId; // 返回本轮请求共享的 traceId。
+    }
 
-    private Long conversationId; // 当前会话ID，用于保存会话级最近命中文档焦点。
-
-    private String currentMessage; // 当前轮用户原始输入，只供工具解析“这篇/之前那篇”等指代，不拼接历史或长期记忆。
+    public void setTraceId(String traceId) { // 设置当前聊天请求追踪ID。
+        this.traceId = traceId; // 保存 traceId 供工具日志使用。
+    }
 
     public Long getUserId() { // 获取当前登录用户ID。
         return userId; // 返回用户ID。
     }
 
     public void setUserId(Long userId) { // 设置当前登录用户ID。
-        this.userId = userId; // 写入用户ID。
+        this.userId = userId; // 保存用户ID。
     }
 
     public Long getConversationId() { // 获取当前会话ID。
@@ -29,14 +41,22 @@ public class ToolCallingRequestContext { // 单次Tool Calling请求的通用上
     }
 
     public void setConversationId(Long conversationId) { // 设置当前会话ID。
-        this.conversationId = conversationId; // 写入会话ID。
+        this.conversationId = conversationId; // 保存会话ID。
     }
 
-    public String getCurrentMessage() { // 获取当前轮用户原始输入。
+    public String getCurrentMessage() { // 获取当前用户原始输入。
         return currentMessage; // 返回当前消息。
     }
 
-    public void setCurrentMessage(String currentMessage) { // 设置当前轮用户原始输入。
-        this.currentMessage = currentMessage; // 写入当前消息。
+    public void setCurrentMessage(String currentMessage) { // 设置当前用户原始输入。
+        this.currentMessage = currentMessage; // 保存当前消息。
+    }
+
+    public ToolCallLogRecorder getToolCallLogRecorder() { // 获取可选工具调用日志回调。
+        return toolCallLogRecorder; // 返回上层业务模块传入的日志回调。
+    }
+
+    public void setToolCallLogRecorder(ToolCallLogRecorder toolCallLogRecorder) { // 设置可选工具调用日志回调。
+        this.toolCallLogRecorder = toolCallLogRecorder; // 保存回调，同时避免 Tool 模块直接依赖 Agent 模块。
     }
 }

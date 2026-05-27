@@ -22,7 +22,7 @@ import java.util.UUID;
  * 工具执行成功时调用 markSuccess，工具执行失败时调用 markFailed，最终回答完成后调用
  * updateFinalAnswerByTraceId 回填同 traceId 下的全部记录。</p>
  * <p>边界说明：本实现只访问 tool_call_log 表，不创建表，不执行建表 SQL，不修改数据库结构，
- * 当前步骤不接入 ToolCallingChatServiceImpl，不影响 ragSearch 和 summarizeArticle。</p>
+ * 接入主链路时只由 ChatMessageServiceImpl 提供回调适配，不改变 ragSearch 和 summarizeArticle 的业务逻辑。</p>
  */
 @Slf4j // 使用 SLF4J 记录必要状态，不打印完整 argumentsJson、resultJson、finalAnswer。
 @Service // 注册为 Spring Bean，供后续 Tool Calling 链路按接口注入。
@@ -121,7 +121,7 @@ public class ToolCallLogServiceImpl extends ServiceImpl<ToolCallLogMapper, ToolC
         long recordCount = count(new LambdaQueryWrapper<ToolCallLog>() // 只统计是否存在记录，避免加载 resultJson/finalAnswer 大字段。
                 .eq(ToolCallLog::getTraceId, safeTraceId)); // 按 trace_id 精确匹配。
         if (recordCount <= 0) { // 没有记录时无需更新。
-            log.warn("[ToolCallLog] update final answer skipped, no log found, traceId: {}", safeTraceId); // 只打印 traceId。
+            log.debug("[ToolCallLog] update final answer skipped, no log found, traceId: {}", safeTraceId); // 普通no-tool聊天没有日志时安静返回。
             return; // 直接返回。
         }
 
@@ -134,7 +134,7 @@ public class ToolCallLogServiceImpl extends ServiceImpl<ToolCallLogMapper, ToolC
 
     private String resolveTraceId(String traceId) {
         if (isBlank(traceId)) { // 没有传入 traceId 时生成新的追踪 ID。
-            return UUID.randomUUID().toString(); // UUID 长度 36，适配 trace_id VARCHAR(64)。
+            return UUID.randomUUID().toString().replace("-", ""); // 生成无横线 traceId，适配当前聊天请求追踪ID风格。
         }
         return safeText(traceId, TRACE_ID_MAX_LENGTH); // 传入 traceId 时按数据库字段长度截断。
     }

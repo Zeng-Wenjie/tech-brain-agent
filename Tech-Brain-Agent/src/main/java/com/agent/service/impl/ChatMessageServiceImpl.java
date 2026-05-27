@@ -4,14 +4,17 @@ import com.agent.entity.ChatMessage;
 import com.agent.entity.Conversation;
 import com.agent.entity.ConversationMemory;
 import com.agent.entity.dto.ChatRequestDTO;
+import com.agent.entity.dto.ToolCallLogCreateRequest;
 import com.agent.mapper.ChatMessageMapper;
 import com.agent.mapper.ConversationMapper;
 import com.agent.service.ChatMessageService;
 import com.agent.service.ConversationMemoryService;
+import com.agent.service.ToolCallLogService;
 import com.agent.toolcalling.core.ToolChatHistoryMessage;
 import com.agent.toolcalling.core.ToolCallingChatService;
 import com.agent.toolcalling.core.ToolCallingStreamCallback;
 import com.agent.toolcalling.context.ToolCallingRequestContext;
+import com.agent.toolcalling.log.ToolCallLogRecorder;
 import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
@@ -27,6 +30,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -60,6 +64,9 @@ public class ChatMessageServiceImpl implements ChatMessageService {
 
     @Autowired
     private ToolCallingChatService toolCallingChatService; // /chat/message 唯一正式编排器，负责 Tool Calling 与 DeepSeek 流式输出。
+
+    @Autowired
+    private ToolCallLogService toolCallLogService; // 工具调用日志服务，只用于tool_call_log记录和final_answer回填。
 
     @Autowired
     private ConversationMemoryService conversationMemoryService; // assistant 回复完成后异步线程内更新 conversation_memory 长期记忆。
@@ -105,11 +112,14 @@ public class ChatMessageServiceImpl implements ChatMessageService {
 
         log.debug("[ChatMessage] use ToolCallingChatService.chatStream: true"); // 调用细节降级为DEBUG。
         log.debug("[ChatMessage] tool-calling raw user message: {}", previewContent(rawUserMessage)); // 用户原文只在DEBUG打印短preview。
+        String traceId = createTraceId(); // 每轮 /chat/message 生成一个traceId，所有工具调用共享。
         StringBuilder fullAnswer = new StringBuilder(); // 流式 token 先在内存聚合，完成后一次性保存 assistant 消息。
         ToolCallingRequestContext requestContext = new ToolCallingRequestContext(); // 构造工具执行期上下文，只供AiTool读取userId/conversationId。
+        requestContext.setTraceId(traceId); // 将本轮traceId传入Tool Calling编排链路。
         requestContext.setUserId(userId); // 当前登录用户ID来自后端UserContext，不从前端或模型参数读取。
         requestContext.setConversationId(conversation.getId()); // 当前会话ID用于RAG命中后保存conversation级focus。
         requestContext.setCurrentMessage(rawUserMessage); // 当前原始输入只给工具做focus动态匹配，不拼接历史或长期记忆。
+        requestContext.setToolCallLogRecorder(buildToolCallLogRecorder()); // 注入日志回调，避免Tech-Brain-Tool模块直接依赖Agent服务。
         toolCallingChatService.chatStream(rawUserMessage, memorySummary, toolHistoryMessages, requestContext, new ToolCallingStreamCallback() { // 传入长期记忆、结构化历史和工具上下文，禁止恢复multiTurnQuestion。
             @Override
             public void onToken(String token) { // 收到最终回答的增量 token。
@@ -129,6 +139,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
                     log.info("[ChatMessage] stream complete, save assistant message"); // 标记流式完成后开始保存完整 assistant 回复。
                     saveMessage(conversation.getId(), userId, ROLE_ASSISTANT, fullAnswer.toString(), LocalDateTime.now()); // 保存完整 assistant 消息，保证聊天历史完整。
                     log.info("[ChatMessage] assistant message saved length: {}", fullAnswer.length()); // 只打印保存长度，不打印 assistant 完整内容。
+                    updateToolCallFinalAnswer(traceId, fullAnswer.toString()); // assistant消息保存后按traceId回填工具日志final_answer。
                     updateConversationTime(conversation.getId(), userId); // 刷新会话更新时间，保持会话列表排序正确。
                     Map<String, Object> doneData = new HashMap<>(); // done 事件携带 conversationId，保持前端完成事件格式不变。
                     doneData.put("conversationId", conversation.getId()); // 返回真实会话 ID，兼容新会话首轮发送场景。
@@ -288,6 +299,56 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         }
         String normalizedContent = content.replace('\n', ' ').replace('\r', ' '); // 日志预览去掉换行，保持单行可读。
         return normalizedContent.length() <= 80 ? normalizedContent : normalizedContent.substring(0, 80) + "..."; // 只保留前 80 字作为日志预览。
+    }
+
+    private String createTraceId() { // 创建本轮聊天请求追踪ID。
+        return UUID.randomUUID().toString().replace("-", ""); // 使用无横线UUID，适配trace_id VARCHAR(64)。
+    }
+
+    private ToolCallLogRecorder buildToolCallLogRecorder() { // 构造跨模块日志回调适配器。
+        return new ToolCallLogRecorder() { // 匿名实现只负责把Tool模块回调转发到Agent日志服务。
+            @Override
+            public Long createRunningLog(String traceId,
+                                         Long conversationId,
+                                         Long userId,
+                                         String userMessage,
+                                         String toolName,
+                                         String toolType,
+                                         String callSource,
+                                         String routeReason,
+                                         String argumentsJson) { // 创建运行中日志。
+                ToolCallLogCreateRequest request = new ToolCallLogCreateRequest(); // 构造内部Service入参DTO。
+                request.setTraceId(traceId); // 写入本轮traceId。
+                request.setConversationId(conversationId); // 写入会话ID。
+                request.setUserId(userId); // 写入用户ID。
+                request.setUserMessage(userMessage); // 写入当前用户原始输入。
+                request.setToolName(toolName); // 写入工具名。
+                request.setToolType(toolType); // 写入工具类型。
+                request.setCallSource(callSource); // 写入调用来源。
+                request.setRouteReason(routeReason); // 写入路由原因。
+                request.setArgumentsJson(argumentsJson); // 写入工具参数JSON快照。
+                return toolCallLogService.createRunningLog(request); // 委托日志服务保存tool_call_log。
+            }
+
+            @Override
+            public void markSuccess(Long id, String resultJson, Long durationMs) { // 标记工具技术执行成功。
+                toolCallLogService.markSuccess(id, resultJson, durationMs); // 委托日志服务写入result_json和duration_ms。
+            }
+
+            @Override
+            public void markFailed(Long id, String errorMessage, Long durationMs) { // 标记工具执行抛异常。
+                toolCallLogService.markFailed(id, errorMessage, durationMs); // 委托日志服务写入error_message和duration_ms。
+            }
+        };
+    }
+
+    private void updateToolCallFinalAnswer(String traceId, String finalAnswer) { // 流式完成后回填同traceId下工具日志的最终聊天气泡内容。
+        try {
+            log.info("[ChatMessage] update tool call final answer, traceId: {}", traceId); // 只打印traceId，不打印完整finalAnswer。
+            toolCallLogService.updateFinalAnswerByTraceId(traceId, finalAnswer); // 没有工具调用记录时日志服务会安全返回。
+        } catch (Exception e) {
+            log.warn("[ToolCallLog] update final answer failed, traceId: {}, error: {}", traceId, e.getMessage(), e); // 日志回填失败不能影响SSE完成。
+        }
     }
 
     private void updateConversationTime(Long conversationId, Long userId) {
