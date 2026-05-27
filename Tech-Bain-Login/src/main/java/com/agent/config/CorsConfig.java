@@ -19,6 +19,7 @@ public class CorsConfig {
         // 2. 允许的前端域
         // 2. Allowed frontend origins.
         config.addAllowedOrigin("http://localhost:5173");
+        config.addAllowedOrigin("http://localhost:5174");
         // 3. 允许的 Header（你的 JWT Token 就在这）
         // 3. Allowed headers, including the JWT token header.
         config.addAllowedHeader("*");
