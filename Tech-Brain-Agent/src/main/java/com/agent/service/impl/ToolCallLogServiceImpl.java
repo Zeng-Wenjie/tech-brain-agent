@@ -4,8 +4,10 @@ import com.agent.entity.ToolCallLog;
 import com.agent.entity.dto.PageDTO;
 import com.agent.entity.dto.ToolCallLogCreateRequest;
 import com.agent.entity.dto.ToolCallLogPageRequest;
+import com.agent.entity.dto.ToolCallRagHitStatsRequest;
 import com.agent.entity.dto.ToolCallStatsRequest;
 import com.agent.entity.vo.ToolCallLogVO;
+import com.agent.entity.vo.ToolCallRagHitStatsVO;
 import com.agent.entity.vo.ToolCallStatsVO;
 import com.agent.mapper.ToolCallLogMapper;
 import com.agent.service.ToolCallLogService;
@@ -15,6 +17,8 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -23,18 +27,22 @@ import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
  * Tool Calling 调用日志服务实现。
  *
  * <p>适用场景：提供 tool_call_log 表的基础写入、执行结果更新、最终回答回填、
- * 后台分页查询、单条详情查询和按工具名称统计能力。</p>
+ * 后台分页查询、单条详情查询、按工具名称统计和 RAG 命中率统计能力。</p>
  * <p>调用链：工具执行链路通过 createRunningLog、markSuccess、markFailed 和
  * updateFinalAnswerByTraceId 维护日志生命周期；后台接口通过 pageToolCallLogs 和
- * getToolCallLogDetail 查询日志，statByToolName 汇总当前用户的工具调用情况。</p>
+ * getToolCallLogDetail 查询日志，statByToolName 汇总当前用户的工具调用情况，
+ * statRagHit 解析 ragSearch 结果并统计命中率。</p>
  * <p>边界说明：本实现只访问已存在的 tool_call_log 表，不创建表，不执行建表 SQL，
  * 不修改数据库结构，不改变 ragSearch、summarizeArticle、summary_result 或聊天主链路。</p>
  */
@@ -43,6 +51,7 @@ import java.util.stream.Collectors;
 public class ToolCallLogServiceImpl extends ServiceImpl<ToolCallLogMapper, ToolCallLog> implements ToolCallLogService { // 工具调用日志服务实现。
 
     private static final String UNKNOWN_TOOL_NAME = "UNKNOWN"; // 工具名称缺失时使用的兜底值。
+    private static final String RAG_SEARCH_TOOL_NAME = "ragSearch"; // RAG 工具固定名称。
     private static final int TRACE_ID_MAX_LENGTH = 64; // trace_id 字段最大长度。
     private static final int TOOL_NAME_MAX_LENGTH = 100; // tool_name 字段最大长度。
     private static final int TOOL_TYPE_MAX_LENGTH = 50; // tool_type 字段最大长度。
@@ -58,6 +67,9 @@ public class ToolCallLogServiceImpl extends ServiceImpl<ToolCallLogMapper, ToolC
     private static final int MAX_PAGE_SIZE = 100; // 后台查询最大每页数量。
     private static final int USER_MESSAGE_PREVIEW_LENGTH = 80; // 用户输入预览长度。
     private static final int CONTENT_PREVIEW_LENGTH = 120; // 工具参数、结果、回答和错误预览长度。
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper(); // 只用于解析历史 result_json，不修改原始日志数据。
+    private static final Pattern RAG_HIT_COUNT_PATTERN = Pattern.compile("(?i)(?:real\\s+rag\\s+result\\s+count|result\\s*count|result_count|resultCount|hit\\s*count|hitCount|hits|命中数量|检索结果数量)\\s*[:=：]\\s*(\\d+)"); // 兼容常见命中数量文本格式。
+    private static final Pattern RAG_SEGMENT_PATTERN = Pattern.compile("片段\\s*\\d+\\s*[：:]"); // 兼容当前 RagSearchTool 的片段编号格式。
 
     @Override // 创建运行中的工具调用日志。
     public Long createRunningLog(ToolCallLogCreateRequest request) {
@@ -196,6 +208,59 @@ public class ToolCallLogServiceImpl extends ServiceImpl<ToolCallLogMapper, ToolC
         return rows.stream().map(this::toStatsVO).collect(Collectors.toList()); // 转换为后台统计 VO。
     }
 
+    @Override // 统计当前用户 ragSearch 工具的命中率。
+    public ToolCallRagHitStatsVO statRagHit(ToolCallRagHitStatsRequest request) {
+        Long currentUserId = UserContext.getUserId(); // RAG 命中率统计必须从登录上下文读取用户 ID。
+        if (currentUserId == null) { // 没有登录用户时不返回任何真实统计。
+            return emptyRagHitStats(); // 防止误查全量工具调用日志。
+        }
+
+        ToolCallRagHitStatsRequest safeRequest = request == null ? new ToolCallRagHitStatsRequest() : request; // 请求为空时统计当前用户全部 ragSearch 日志。
+        log.info("[ToolCallLog] stat rag hit, userId: {}", currentUserId); // 只打印用户 ID，不打印 resultJson。
+        List<ToolCallLog> ragLogs = list(buildRagHitWrapper(safeRequest, currentUserId)); // 查询符合条件的 ragSearch 日志。
+        long totalCount = ragLogs.size(); // RAG 总调用次数。
+        long hitCount = 0L; // 命中次数。
+        long emptyCount = 0L; // 未命中次数。
+        long unknownCount = 0L; // 无法解析次数。
+        long totalHitSize = 0L; // 命中记录的命中数量总和。
+        int maxHitSize = 0; // 单次最大命中数量。
+
+        for (ToolCallLog ragLog : ragLogs) { // 遍历每条 ragSearch 日志解析 result_json。
+            int hitSize = parseRagHitSize(ragLog == null ? null : ragLog.getResultJson()); // 解析单次 RAG 命中数量。
+            if (hitSize > 0) { // 命中数量大于 0 表示本次 RAG 命中。
+                hitCount++; // 累加命中次数。
+                totalHitSize += hitSize; // 累加命中数量。
+                maxHitSize = Math.max(maxHitSize, hitSize); // 更新最大命中数量。
+            } else if (hitSize == 0) { // 命中数量等于 0 表示本次 RAG 未命中。
+                emptyCount++; // 累加未命中次数。
+            } else { // -1 表示历史结果无法解析。
+                unknownCount++; // 累加无法解析次数。
+            }
+        }
+
+        ToolCallRagHitStatsVO vo = new ToolCallRagHitStatsVO(); // 创建 RAG 命中率统计返回对象。
+        vo.setTotalCount(totalCount); // 写入总调用次数。
+        vo.setHitCount(hitCount); // 写入命中次数。
+        vo.setEmptyCount(emptyCount); // 写入未命中次数。
+        vo.setUnknownCount(unknownCount); // 写入无法解析次数。
+        vo.setHitRate(calculateHitRate(totalCount, hitCount, unknownCount)); // 按可解析调用次数计算命中率。
+        vo.setAvgHitSize(calculateAvgHitSize(hitCount, totalHitSize)); // 只按命中记录计算平均命中数量。
+        vo.setMaxHitSize(maxHitSize); // 写入最大命中数量。
+        return vo; // 返回统计结果。
+    }
+
+    private LambdaQueryWrapper<ToolCallLog> buildRagHitWrapper(ToolCallRagHitStatsRequest request, Long currentUserId) {
+        LambdaQueryWrapper<ToolCallLog> wrapper = new LambdaQueryWrapper<>(); // 创建 MyBatis-Plus 查询条件。
+        wrapper.select(ToolCallLog::getResultJson); // 只查询 result_json，避免加载不需要的大字段。
+        wrapper.eq(ToolCallLog::getUserId, currentUserId); // 始终按当前用户过滤，禁止统计其它用户日志。
+        wrapper.eq(ToolCallLog::getToolName, RAG_SEARCH_TOOL_NAME); // 本接口固定只统计 ragSearch。
+        wrapper.eq(request.getConversationId() != null, ToolCallLog::getConversationId, request.getConversationId()); // conversationId 非空时精确筛选。
+        wrapper.eq(hasText(request.getCallSource()), ToolCallLog::getCallSource, trimToNull(request.getCallSource())); // callSource 有效时精确筛选，忽略 Swagger 默认 string。
+        wrapper.ge(request.getStartTime() != null, ToolCallLog::getCreateTime, request.getStartTime()); // startTime 非空时限定统计起始时间。
+        wrapper.le(request.getEndTime() != null, ToolCallLog::getCreateTime, request.getEndTime()); // endTime 非空时限定统计结束时间。
+        return wrapper; // 返回 RAG 命中率统计查询条件。
+    }
+
     private QueryWrapper<ToolCallLog> buildStatsWrapper(ToolCallStatsRequest request, Long currentUserId) {
         QueryWrapper<ToolCallLog> wrapper = new QueryWrapper<>(); // 创建 MyBatis-Plus 普通查询条件，便于写聚合列。
         wrapper.select(
@@ -294,6 +359,18 @@ public class ToolCallLogServiceImpl extends ServiceImpl<ToolCallLogMapper, ToolC
         pageDTO.setPages(0L); // 空结果总页数为 0。
         pageDTO.setList(Collections.emptyList()); // 空结果列表。
         return pageDTO; // 返回空分页。
+    }
+
+    private ToolCallRagHitStatsVO emptyRagHitStats() {
+        ToolCallRagHitStatsVO vo = new ToolCallRagHitStatsVO(); // 创建空 RAG 命中率统计结果。
+        vo.setTotalCount(0L); // 空结果总调用次数为 0。
+        vo.setHitCount(0L); // 空结果命中次数为 0。
+        vo.setEmptyCount(0L); // 空结果未命中次数为 0。
+        vo.setUnknownCount(0L); // 空结果无法解析次数为 0。
+        vo.setHitRate(BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP)); // 空结果命中率为 0.0000。
+        vo.setAvgHitSize(BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP)); // 空结果平均命中数量为 0.00。
+        vo.setMaxHitSize(0); // 空结果最大命中数量为 0。
+        return vo; // 返回空统计对象。
     }
 
     private Long resolveQueryUserId(Long requestUserId) {
@@ -405,6 +482,160 @@ public class ToolCallLogServiceImpl extends ServiceImpl<ToolCallLogMapper, ToolC
             }
         }
         return decimalValue.setScale(scale, RoundingMode.HALF_UP); // 按接口约定保留固定小数位。
+    }
+
+    private int parseRagHitSize(String resultJson) {
+        if (isBlank(resultJson)) { // 空 result_json 无法判断命中数量。
+            return -1; // 返回无法解析。
+        }
+        String resultText = resultJson.trim(); // 去除首尾空白，兼容历史数据。
+        Integer jsonHitSize = parseRagHitSizeFromJson(resultText); // 优先按 JSON 结构解析命中数量。
+        if (jsonHitSize != null) { // JSON 中存在可用命中数量。
+            return Math.max(jsonHitSize, 0); // 命中数量不允许为负数。
+        }
+        return parseRagHitSizeFromText(resultText); // JSON 无法解析时走文本兜底。
+    }
+
+    private Integer parseRagHitSizeFromJson(String resultText) {
+        try { // 历史 result_json 可能是对象、数组或普通文本。
+            JsonNode rootNode = OBJECT_MAPPER.readTree(resultText); // 尝试按 JSON 解析。
+            if (rootNode == null || rootNode.isNull()) { // JSON 为空节点时没有命中数量。
+                return null; // 继续走文本兜底。
+            }
+            if (rootNode.isArray()) { // result_json 本身是数组时，数组长度就是命中数量。
+                return rootNode.size(); // 返回数组长度。
+            }
+            if (!rootNode.isObject()) { // 非对象、非数组的 JSON 不作为命中数量来源。
+                return null; // 继续走文本兜底。
+            }
+            Integer rootHitSize = readRagHitSizeFromObject(rootNode); // 读取根对象中的命中数量字段。
+            if (rootHitSize != null) { // 根对象有可用字段。
+                return rootHitSize; // 返回根对象命中数量。
+            }
+            JsonNode dataNode = rootNode.path("data"); // 读取 data 节点，兼容 data.hitCount 等历史结构。
+            if (dataNode.isObject()) { // data 是对象时继续读取固定字段。
+                return readRagHitSizeFromObject(dataNode); // 返回 data 内命中数量。
+            }
+            if (dataNode.isArray()) { // data 是数组时，数组长度也可以作为命中数量。
+                return dataNode.size(); // 返回 data 数组长度。
+            }
+            return null; // JSON 中没有可用字段。
+        } catch (Exception e) { // 普通文本不是 JSON，解析失败属于正常历史兼容场景。
+            return null; // 继续走文本兜底。
+        }
+    }
+
+    private Integer readRagHitSizeFromObject(JsonNode objectNode) {
+        String[] numericFields = {"hitCount", "hitSize", "resultCount", "count", "total"}; // 兼容用户指定的命中数量字段。
+        for (String field : numericFields) { // 遍历候选数字字段。
+            JsonNode valueNode = objectNode.get(field); // 读取字段值。
+            Integer hitSize = readIntegerNode(valueNode); // 尝试解析为整数。
+            if (hitSize != null) { // 字段存在且可解析。
+                return hitSize; // 返回解析结果。
+            }
+        }
+        String[] arrayFields = {"hits", "results", "items", "records"}; // 兼容历史 JSON 中直接放数组结果的字段。
+        for (String field : arrayFields) { // 遍历候选数组字段。
+            JsonNode valueNode = objectNode.get(field); // 读取字段值。
+            if (valueNode != null && valueNode.isArray()) { // 字段是数组时可用数组长度表示命中数量。
+                return valueNode.size(); // 返回数组长度。
+            }
+        }
+        return null; // 没有找到可用字段。
+    }
+
+    private Integer readIntegerNode(JsonNode valueNode) {
+        if (valueNode == null || valueNode.isNull()) { // 字段不存在或为空。
+            return null; // 无法解析。
+        }
+        if (valueNode.isNumber()) { // 数字节点直接读取。
+            return valueNode.asInt(); // 返回整数值。
+        }
+        if (valueNode.isTextual()) { // 字符串数字也兼容解析。
+            return parseInteger(valueNode.asText()); // 返回解析结果。
+        }
+        return null; // 其它节点类型不作为命中数量。
+    }
+
+    private int parseRagHitSizeFromText(String resultText) {
+        String lowerText = resultText.toLowerCase(Locale.ROOT); // 英文关键词统一转小写匹配。
+        if (containsAny(resultText,
+                "未找到", "没有找到", "没有检索到", "未检索到", "无相关内容", "本次知识库检索未找到")) { // 中文未命中文案。
+            return 0; // 明确未命中。
+        }
+        if (containsAny(lowerText,
+                "real rag result count: 0", "result count: 0", "hits=0", "hits: 0")) { // 英文未命中文案。
+            return 0; // 明确未命中。
+        }
+
+        Matcher countMatcher = RAG_HIT_COUNT_PATTERN.matcher(resultText); // 匹配常见 result count、hitCount、hits 等格式。
+        if (countMatcher.find()) { // 文本中存在可解析数字。
+            Integer hitSize = parseInteger(countMatcher.group(1)); // 读取第一个数字分组。
+            if (hitSize != null) { // 数字解析成功。
+                return Math.max(hitSize, 0); // 命中数量不允许为负数。
+            }
+        }
+
+        int segmentCount = countPatternMatches(RAG_SEGMENT_PATTERN, resultText); // 当前 RagSearchTool 会输出片段1、片段2 等编号。
+        if (segmentCount > 0) { // 能从片段编号确定命中数量。
+            return segmentCount; // 返回片段数量。
+        }
+
+        if (containsAny(resultText,
+                "以下是从知识库检索到的相关内容", "从知识库检索到的相关内容", "根据你的知识库", "real rag result:")) { // 能确定有命中但无法确定数量。
+            return 1; // 保守按 1 次命中处理。
+        }
+        return -1; // 其它历史格式无法解析。
+    }
+
+    private boolean containsAny(String text, String... keywords) {
+        if (text == null || keywords == null) { // 文本或关键词为空时不匹配。
+            return false; // 返回未匹配。
+        }
+        for (String keyword : keywords) { // 遍历候选关键词。
+            if (keyword != null && text.contains(keyword)) { // 命中任意关键词。
+                return true; // 返回匹配成功。
+            }
+        }
+        return false; // 未命中任何关键词。
+    }
+
+    private int countPatternMatches(Pattern pattern, String text) {
+        if (pattern == null || text == null) { // 正则或文本为空时无法统计。
+            return 0; // 返回 0。
+        }
+        int count = 0; // 初始化匹配次数。
+        Matcher matcher = pattern.matcher(text); // 创建匹配器。
+        while (matcher.find()) { // 遍历所有匹配。
+            count++; // 累加片段数量。
+        }
+        return count; // 返回匹配次数。
+    }
+
+    private Integer parseInteger(String text) {
+        if (isBlank(text)) { // 空文本不是数字。
+            return null; // 返回无法解析。
+        }
+        try { // 尝试按整数解析。
+            return Integer.parseInt(text.trim()); // 返回整数值。
+        } catch (NumberFormatException e) { // 非数字文本无法解析。
+            return null; // 返回无法解析。
+        }
+    }
+
+    private BigDecimal calculateHitRate(long totalCount, long hitCount, long unknownCount) {
+        long validCount = totalCount - unknownCount; // 命中率只按可解析记录计算。
+        if (validCount <= 0) { // 没有可解析记录时命中率为 0。
+            return BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP); // 返回 0.0000。
+        }
+        return BigDecimal.valueOf(hitCount).divide(BigDecimal.valueOf(validCount), 4, RoundingMode.HALF_UP); // hitCount / validCount。
+    }
+
+    private BigDecimal calculateAvgHitSize(long hitCount, long totalHitSize) {
+        if (hitCount <= 0) { // 没有命中记录时平均命中数量为 0。
+            return BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP); // 返回 0.00。
+        }
+        return BigDecimal.valueOf(totalHitSize).divide(BigDecimal.valueOf(hitCount), 2, RoundingMode.HALF_UP); // totalHitSize / hitCount。
     }
 
     private String preview(String text, int maxLength) {

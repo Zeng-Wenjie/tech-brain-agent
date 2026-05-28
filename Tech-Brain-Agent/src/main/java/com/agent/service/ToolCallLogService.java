@@ -4,8 +4,10 @@ import com.agent.entity.ToolCallLog;
 import com.agent.entity.dto.PageDTO;
 import com.agent.entity.dto.ToolCallLogCreateRequest;
 import com.agent.entity.dto.ToolCallLogPageRequest;
+import com.agent.entity.dto.ToolCallRagHitStatsRequest;
 import com.agent.entity.dto.ToolCallStatsRequest;
 import com.agent.entity.vo.ToolCallLogVO;
+import com.agent.entity.vo.ToolCallRagHitStatsVO;
 import com.agent.entity.vo.ToolCallStatsVO;
 import com.baomidou.mybatisplus.extension.service.IService;
 
@@ -15,7 +17,7 @@ import java.util.List;
  * Tool Calling 调用日志服务接口。
  *
  * <p>适用场景：为 Tool Calling 链路提供日志创建、成功更新、失败更新、最终回答回填、
- * 后台分页查询、详情查询和按工具名称统计能力。</p>
+ * 后台分页查询、详情查询、按工具名称统计和 RAG 命中率统计能力。</p>
  * <p>调用链：ToolCallingChatServiceImpl 通过 ChatMessageServiceImpl 注入的回调写入日志；
  * ToolCallLogController 通过本接口查询 tool_call_log；最终由 ToolCallLogMapper 访问数据库。</p>
  * <p>边界说明：本接口只定义 tool_call_log 的持久化、查询和统计能力，不创建表，不执行建表 SQL，
@@ -36,4 +38,6 @@ public interface ToolCallLogService extends IService<ToolCallLog> { // 继承 My
     ToolCallLogVO getToolCallLogDetail(Long id, Long currentUserId); // 查询当前用户可见的单条工具调用日志详情。
 
     List<ToolCallStatsVO> statByToolName(ToolCallStatsRequest request); // 按工具名称统计当前用户的调用量、失败率和平均耗时。
+
+    ToolCallRagHitStatsVO statRagHit(ToolCallRagHitStatsRequest request); // 统计当前用户 ragSearch 工具的命中率和命中数量。
 }

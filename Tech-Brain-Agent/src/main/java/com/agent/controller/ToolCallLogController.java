@@ -3,8 +3,10 @@ package com.agent.controller;
 import com.agent.entity.Result;
 import com.agent.entity.dto.PageDTO;
 import com.agent.entity.dto.ToolCallLogPageRequest;
+import com.agent.entity.dto.ToolCallRagHitStatsRequest;
 import com.agent.entity.dto.ToolCallStatsRequest;
 import com.agent.entity.vo.ToolCallLogVO;
+import com.agent.entity.vo.ToolCallRagHitStatsVO;
 import com.agent.entity.vo.ToolCallStatsVO;
 import com.agent.service.ToolCallLogService;
 import com.agent.utils.UserContext;
@@ -24,7 +26,7 @@ import java.util.List;
  * 工具调用日志后台查询接口。
  *
  * <p>适用场景：后台排查 Tool Calling 工具调用问题时，按用户、会话、traceId、工具名、
- * 执行状态和时间范围查询 tool_call_log，也可以按工具名称查看调用量、失败率和平均耗时。</p>
+ * 执行状态和时间范围查询 tool_call_log，也可以按工具名称查看调用量、失败率、平均耗时和 RAG 命中率。</p>
  * <p>调用链：前端后台页面或接口调试工具 -> ToolCallLogController -> ToolCallLogService
  * -> ToolCallLogMapper -> tool_call_log。</p>
  * <p>边界说明：本 Controller 只提供只读查询接口，不修改数据库结构，不写入日志，
@@ -59,6 +61,17 @@ public class ToolCallLogController { // 工具调用日志查询 Controller。
         }
         ToolCallStatsRequest safeRequest = request == null ? new ToolCallStatsRequest() : request; // 请求为空时按当前用户做无筛选统计。
         return Result.success(toolCallLogService.statByToolName(safeRequest)); // 返回按工具名称分组后的统计结果。
+    }
+
+    @Operation(summary = "统计 RAG 工具命中率")
+    @GetMapping("/stats/rag-hit")
+    public Result<ToolCallRagHitStatsVO> statRagHit(@ParameterObject ToolCallRagHitStatsRequest request) { // 查询当前用户自己的 ragSearch 命中率统计数据。
+        Long currentUserId = UserContext.getUserId(); // 从登录上下文读取当前用户 ID。
+        if (currentUserId == null) { // 没有登录用户时拒绝统计。
+            return Result.error(HttpServletResponse.SC_UNAUTHORIZED, "未登录或登录状态失效"); // 返回统一未登录错误。
+        }
+        ToolCallRagHitStatsRequest safeRequest = request == null ? new ToolCallRagHitStatsRequest() : request; // 请求为空时按当前用户做无筛选 RAG 统计。
+        return Result.success(toolCallLogService.statRagHit(safeRequest)); // 返回 ragSearch 命中率统计结果。
     }
 
     @Operation(summary = "查询工具调用日志详情")
