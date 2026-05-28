@@ -4,20 +4,26 @@ import com.agent.entity.ToolCallLog;
 import com.agent.entity.dto.PageDTO;
 import com.agent.entity.dto.ToolCallLogCreateRequest;
 import com.agent.entity.dto.ToolCallLogPageRequest;
+import com.agent.entity.dto.ToolCallStatsRequest;
 import com.agent.entity.vo.ToolCallLogVO;
+import com.agent.entity.vo.ToolCallStatsVO;
 import com.agent.mapper.ToolCallLogMapper;
 import com.agent.service.ToolCallLogService;
 import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -25,10 +31,10 @@ import java.util.stream.Collectors;
  * Tool Calling 调用日志服务实现。
  *
  * <p>适用场景：提供 tool_call_log 表的基础写入、执行结果更新、最终回答回填、
- * 后台分页查询和单条详情查询能力。</p>
+ * 后台分页查询、单条详情查询和按工具名称统计能力。</p>
  * <p>调用链：工具执行链路通过 createRunningLog、markSuccess、markFailed 和
  * updateFinalAnswerByTraceId 维护日志生命周期；后台接口通过 pageToolCallLogs 和
- * getToolCallLogDetail 查询日志。</p>
+ * getToolCallLogDetail 查询日志，statByToolName 汇总当前用户的工具调用情况。</p>
  * <p>边界说明：本实现只访问已存在的 tool_call_log 表，不创建表，不执行建表 SQL，
  * 不修改数据库结构，不改变 ragSearch、summarizeArticle、summary_result 或聊天主链路。</p>
  */
@@ -176,6 +182,54 @@ public class ToolCallLogServiceImpl extends ServiceImpl<ToolCallLogMapper, ToolC
         return toDetailVO(logRecord); // 转换为详情 VO。
     }
 
+    @Override // 按工具名称统计当前用户的工具调用情况。
+    public List<ToolCallStatsVO> statByToolName(ToolCallStatsRequest request) {
+        Long currentUserId = UserContext.getUserId(); // 统计接口必须从登录上下文读取用户 ID。
+        if (currentUserId == null) { // 没有登录用户时不返回任何统计数据。
+            return Collections.emptyList(); // 防止误查全量工具调用日志。
+        }
+
+        ToolCallStatsRequest safeRequest = request == null ? new ToolCallStatsRequest() : request; // 请求为空时使用无筛选统计。
+        log.info("[ToolCallLog] stat by tool name, userId: {}", currentUserId); // 只打印用户 ID，不打印完整筛选条件。
+        QueryWrapper<ToolCallLog> wrapper = buildStatsWrapper(safeRequest, currentUserId); // 构造分组统计查询条件。
+        List<Map<String, Object>> rows = listMaps(wrapper); // 使用 MyBatis-Plus 执行聚合查询并返回 Map 结果。
+        return rows.stream().map(this::toStatsVO).collect(Collectors.toList()); // 转换为后台统计 VO。
+    }
+
+    private QueryWrapper<ToolCallLog> buildStatsWrapper(ToolCallStatsRequest request, Long currentUserId) {
+        QueryWrapper<ToolCallLog> wrapper = new QueryWrapper<>(); // 创建 MyBatis-Plus 普通查询条件，便于写聚合列。
+        wrapper.select(
+                "tool_name AS toolName", // 返回工具名称。
+                "tool_type AS toolType", // 返回工具类型。
+                "COUNT(*) AS totalCount", // 统计调用总次数。
+                "SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS successCount", // 统计成功次数。
+                "SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS failureCount", // 统计失败次数。
+                "CASE WHEN COUNT(*) = 0 THEN 0 ELSE SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) * 1.0 / COUNT(*) END AS failureRate", // 失败率使用 1.0 避免整数除法。
+                "AVG(duration_ms) AS avgDurationMs" // 平均耗时，数据库会自动忽略 null。
+        );
+        wrapper.eq("user_id", currentUserId); // 始终按当前用户过滤，禁止统计其它用户日志。
+        wrapper.eq(hasText(request.getToolName()), "tool_name", trimToNull(request.getToolName())); // toolName 有效时精确筛选，忽略 Swagger 默认 string。
+        wrapper.eq(request.getConversationId() != null, "conversation_id", request.getConversationId()); // conversationId 非空时精确筛选。
+        wrapper.eq(hasText(request.getCallSource()), "call_source", trimToNull(request.getCallSource())); // callSource 有效时精确筛选，忽略 Swagger 默认 string。
+        wrapper.ge(request.getStartTime() != null, "create_time", request.getStartTime()); // startTime 非空时限定统计起始时间。
+        wrapper.le(request.getEndTime() != null, "create_time", request.getEndTime()); // endTime 非空时限定统计结束时间。
+        wrapper.groupBy("tool_name", "tool_type"); // 按工具名称和工具类型分组统计。
+        wrapper.orderByDesc("totalCount"); // 默认按调用量倒序，优先展示高频工具。
+        return wrapper; // 返回统计查询条件。
+    }
+
+    private ToolCallStatsVO toStatsVO(Map<String, Object> row) {
+        ToolCallStatsVO vo = new ToolCallStatsVO(); // 创建统计返回对象。
+        vo.setToolName(toStringValue(readValue(row, "toolName", "tool_name"))); // 写入工具名称。
+        vo.setToolType(toStringValue(readValue(row, "toolType", "tool_type"))); // 写入工具类型。
+        vo.setTotalCount(toLongValue(readValue(row, "totalCount", "total_count"))); // 写入调用总次数。
+        vo.setSuccessCount(toLongValue(readValue(row, "successCount", "success_count"))); // 写入成功次数。
+        vo.setFailureCount(toLongValue(readValue(row, "failureCount", "failure_count"))); // 写入失败次数。
+        vo.setFailureRate(toScaledBigDecimal(readValue(row, "failureRate", "failure_rate"), 4)); // 失败率保留四位小数。
+        vo.setAvgDurationMs(toScaledBigDecimal(readValue(row, "avgDurationMs", "avg_duration_ms"), 2)); // 平均耗时保留两位小数，null 返回 0。
+        return vo; // 返回统计对象。
+    }
+
     private LambdaQueryWrapper<ToolCallLog> buildPageWrapper(ToolCallLogPageRequest request, Long queryUserId) {
         LambdaQueryWrapper<ToolCallLog> wrapper = new LambdaQueryWrapper<>(); // 创建 MyBatis-Plus 查询条件。
         wrapper.eq(ToolCallLog::getUserId, queryUserId); // 始终按当前用户过滤，禁止查询其它用户日志。
@@ -297,6 +351,60 @@ public class ToolCallLogServiceImpl extends ServiceImpl<ToolCallLogMapper, ToolC
             return null; // 返回空值。
         }
         return text.trim(); // 返回去除首尾空白后的文本。
+    }
+
+    private Object readValue(Map<String, Object> row, String... keys) {
+        if (row == null || keys == null) { // 聚合查询结果为空时没有可读取值。
+            return null; // 返回空值。
+        }
+        for (String key : keys) { // 先按预期别名读取。
+            if (row.containsKey(key)) { // Map 中存在当前别名。
+                return row.get(key); // 返回别名对应的值。
+            }
+        }
+        for (Map.Entry<String, Object> entry : row.entrySet()) { // 兼容部分驱动返回大小写不同的列别名。
+            for (String key : keys) { // 遍历候选别名。
+                if (entry.getKey() != null && entry.getKey().equalsIgnoreCase(key)) { // 忽略大小写匹配。
+                    return entry.getValue(); // 返回匹配到的值。
+                }
+            }
+        }
+        return null; // 未匹配到时返回空。
+    }
+
+    private String toStringValue(Object value) {
+        return value == null ? null : String.valueOf(value); // 统一把统计列转换为字符串。
+    }
+
+    private Long toLongValue(Object value) {
+        if (value == null) { // 统计值为空时返回 0。
+            return 0L; // 兜底为 0。
+        }
+        if (value instanceof Number) { // 数据库聚合值通常是 Number。
+            return ((Number) value).longValue(); // 转为 Long。
+        }
+        try { // 兼容驱动把数字返回为字符串的情况。
+            return Long.parseLong(String.valueOf(value)); // 按字符串解析 Long。
+        } catch (NumberFormatException e) { // 解析失败说明返回值异常。
+            log.debug("[ToolCallLog] parse long stat value failed"); // 不打印原始值，避免日志噪声。
+            return 0L; // 返回安全默认值。
+        }
+    }
+
+    private BigDecimal toScaledBigDecimal(Object value, int scale) {
+        BigDecimal decimalValue = BigDecimal.ZERO; // 默认数值为 0。
+        if (value instanceof BigDecimal) { // 数据库可能直接返回 BigDecimal。
+            decimalValue = (BigDecimal) value; // 保留数据库返回值。
+        } else if (value instanceof Number) { // 数据库也可能返回 Double、Long 等 Number。
+            decimalValue = BigDecimal.valueOf(((Number) value).doubleValue()); // 转为 BigDecimal 便于统一保留小数位。
+        } else if (value != null) { // 非空字符串形式也尝试解析。
+            try { // 兼容驱动返回字符串数字。
+                decimalValue = new BigDecimal(String.valueOf(value)); // 按字符串构造 BigDecimal。
+            } catch (NumberFormatException e) { // 解析失败时保持默认值。
+                log.debug("[ToolCallLog] parse decimal stat value failed"); // 不打印原始值。
+            }
+        }
+        return decimalValue.setScale(scale, RoundingMode.HALF_UP); // 按接口约定保留固定小数位。
     }
 
     private String preview(String text, int maxLength) {
