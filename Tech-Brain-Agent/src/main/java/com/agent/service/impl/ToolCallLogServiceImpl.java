@@ -3,6 +3,7 @@ package com.agent.service.impl;
 import com.agent.entity.ToolCallLog;
 import com.agent.entity.dto.PageDTO;
 import com.agent.entity.dto.ToolCallLogCreateRequest;
+import com.agent.entity.dto.ToolCallLogExportRequest;
 import com.agent.entity.dto.ToolCallLogPageRequest;
 import com.agent.entity.dto.ToolCallRagHitStatsRequest;
 import com.agent.entity.dto.ToolCallStatsRequest;
@@ -38,11 +39,11 @@ import java.util.stream.Collectors;
  * Tool Calling 调用日志服务实现。
  *
  * <p>适用场景：提供 tool_call_log 表的基础写入、执行结果更新、最终回答回填、
- * 后台分页查询、单条详情查询、按工具名称统计和 RAG 命中率统计能力。</p>
+ * 后台分页查询、单条详情查询、按工具名称统计、RAG 命中率统计和 CSV 导出能力。</p>
  * <p>调用链：工具执行链路通过 createRunningLog、markSuccess、markFailed 和
  * updateFinalAnswerByTraceId 维护日志生命周期；后台接口通过 pageToolCallLogs 和
  * getToolCallLogDetail 查询日志，statByToolName 汇总当前用户的工具调用情况，
- * statRagHit 解析 ragSearch 结果并统计命中率。</p>
+ * statRagHit 解析 ragSearch 结果并统计命中率，listForExport 查询当前用户可导出的日志。</p>
  * <p>边界说明：本实现只访问已存在的 tool_call_log 表，不创建表，不执行建表 SQL，
  * 不修改数据库结构，不改变 ragSearch、summarizeArticle、summary_result 或聊天主链路。</p>
  */
@@ -67,6 +68,12 @@ public class ToolCallLogServiceImpl extends ServiceImpl<ToolCallLogMapper, ToolC
     private static final int MAX_PAGE_SIZE = 100; // 后台查询最大每页数量。
     private static final int USER_MESSAGE_PREVIEW_LENGTH = 80; // 用户输入预览长度。
     private static final int CONTENT_PREVIEW_LENGTH = 120; // 工具参数、结果、回答和错误预览长度。
+    private static final int EXPORT_MAX_SIZE = 5000; // CSV 导出最大记录数，避免一次导出过大。
+    private static final int EXPORT_USER_MESSAGE_PREVIEW_LENGTH = 200; // CSV 预览模式用户输入最大长度。
+    private static final int EXPORT_ARGUMENTS_PREVIEW_LENGTH = 300; // CSV 预览模式参数最大长度。
+    private static final int EXPORT_RESULT_PREVIEW_LENGTH = 500; // CSV 预览模式结果最大长度。
+    private static final int EXPORT_FINAL_ANSWER_PREVIEW_LENGTH = 300; // CSV 预览模式最终回答最大长度。
+    private static final int EXPORT_ERROR_MESSAGE_PREVIEW_LENGTH = 300; // CSV 预览模式错误信息最大长度。
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper(); // 只用于解析历史 result_json，不修改原始日志数据。
     private static final Pattern RAG_HIT_COUNT_PATTERN = Pattern.compile("(?i)(?:real\\s+rag\\s+result\\s+count|result\\s*count|result_count|resultCount|hit\\s*count|hitCount|hits|命中数量|检索结果数量)\\s*[:=：]\\s*(\\d+)"); // 兼容常见命中数量文本格式。
     private static final Pattern RAG_SEGMENT_PATTERN = Pattern.compile("片段\\s*\\d+\\s*[：:]"); // 兼容当前 RagSearchTool 的片段编号格式。
@@ -249,6 +256,27 @@ public class ToolCallLogServiceImpl extends ServiceImpl<ToolCallLogMapper, ToolC
         return vo; // 返回统计结果。
     }
 
+    @Override // 查询当前用户可导出的工具调用日志。
+    public List<ToolCallLogVO> listForExport(ToolCallLogExportRequest request) {
+        Long currentUserId = UserContext.getUserId(); // 导出接口必须从登录上下文读取用户 ID。
+        if (currentUserId == null) { // 没有登录用户时不返回任何日志。
+            return Collections.emptyList(); // 防止误导出全量日志。
+        }
+
+        ToolCallLogExportRequest safeRequest = request == null ? new ToolCallLogExportRequest() : request; // 请求为空时按当前用户无筛选导出。
+        long totalCount = count(buildExportWrapper(safeRequest, currentUserId, false)); // 先统计总量，用于超过上限时给出日志提醒。
+        if (totalCount > EXPORT_MAX_SIZE) { // 超过导出上限时只导出前 5000 条。
+            log.warn("[ToolCallLog] export csv reached limit, userId: {}, total: {}, limit: {}", currentUserId, totalCount, EXPORT_MAX_SIZE); // 不打印任何日志详情。
+        }
+
+        List<ToolCallLog> records = list(buildExportWrapper(safeRequest, currentUserId, true)); // 按筛选条件查询最多 5000 条日志。
+        boolean includeDetail = Boolean.TRUE.equals(safeRequest.getIncludeDetail()); // true 时返回完整字段，默认返回预览字段。
+        log.info("[ToolCallLog] export csv, userId: {}, count: {}", currentUserId, records.size()); // 只打印导出数量。
+        return records.stream()
+                .map(includeDetail ? this::toDetailVO : this::toExportPreviewVO) // 根据 includeDetail 决定返回完整字段或导出预览字段。
+                .collect(Collectors.toList()); // 返回 CSV 生成所需列表。
+    }
+
     private LambdaQueryWrapper<ToolCallLog> buildRagHitWrapper(ToolCallRagHitStatsRequest request, Long currentUserId) {
         LambdaQueryWrapper<ToolCallLog> wrapper = new LambdaQueryWrapper<>(); // 创建 MyBatis-Plus 查询条件。
         wrapper.select(ToolCallLog::getResultJson); // 只查询 result_json，避免加载不需要的大字段。
@@ -259,6 +287,24 @@ public class ToolCallLogServiceImpl extends ServiceImpl<ToolCallLogMapper, ToolC
         wrapper.ge(request.getStartTime() != null, ToolCallLog::getCreateTime, request.getStartTime()); // startTime 非空时限定统计起始时间。
         wrapper.le(request.getEndTime() != null, ToolCallLog::getCreateTime, request.getEndTime()); // endTime 非空时限定统计结束时间。
         return wrapper; // 返回 RAG 命中率统计查询条件。
+    }
+
+    private LambdaQueryWrapper<ToolCallLog> buildExportWrapper(ToolCallLogExportRequest request, Long currentUserId, boolean withLimit) {
+        LambdaQueryWrapper<ToolCallLog> wrapper = new LambdaQueryWrapper<>(); // 创建 MyBatis-Plus 导出查询条件。
+        wrapper.eq(ToolCallLog::getUserId, currentUserId); // 始终按当前用户过滤，禁止导出其它用户日志。
+        wrapper.eq(hasText(request.getTraceId()), ToolCallLog::getTraceId, trimToNull(request.getTraceId())); // traceId 有效时精确筛选，忽略 Swagger 默认 string。
+        wrapper.eq(request.getConversationId() != null, ToolCallLog::getConversationId, request.getConversationId()); // conversationId 非空时精确筛选。
+        wrapper.eq(hasText(request.getToolName()), ToolCallLog::getToolName, trimToNull(request.getToolName())); // toolName 有效时精确筛选，忽略 Swagger 默认 string。
+        wrapper.eq(hasText(request.getToolType()), ToolCallLog::getToolType, trimToNull(request.getToolType())); // toolType 有效时精确筛选，忽略 Swagger 默认 string。
+        wrapper.eq(hasText(request.getCallSource()), ToolCallLog::getCallSource, trimToNull(request.getCallSource())); // callSource 有效时精确筛选，忽略 Swagger 默认 string。
+        wrapper.eq(request.getSuccess() != null, ToolCallLog::getSuccess, request.getSuccess()); // success 非空时精确筛选。
+        wrapper.ge(request.getStartTime() != null, ToolCallLog::getCreateTime, request.getStartTime()); // startTime 非空时查询创建时间下限。
+        wrapper.le(request.getEndTime() != null, ToolCallLog::getCreateTime, request.getEndTime()); // endTime 非空时查询创建时间上限。
+        if (withLimit) { // 真实导出查询需要限制最大条数。
+            wrapper.orderByDesc(ToolCallLog::getCreateTime).orderByDesc(ToolCallLog::getId); // 默认按创建时间倒序，再按 ID 倒序稳定排序。
+            wrapper.last("LIMIT " + EXPORT_MAX_SIZE); // 固定常量拼接，不接收前端输入，避免一次导出过多。
+        }
+        return wrapper; // 返回导出查询条件。
     }
 
     private QueryWrapper<ToolCallLog> buildStatsWrapper(ToolCallStatsRequest request, Long currentUserId) {
@@ -321,6 +367,19 @@ public class ToolCallLogServiceImpl extends ServiceImpl<ToolCallLogMapper, ToolC
         vo.setFinalAnswerPreview(preview(logRecord.getFinalAnswer(), CONTENT_PREVIEW_LENGTH)); // 写入最终回答预览。
         vo.setErrorMessagePreview(preview(logRecord.getErrorMessage(), CONTENT_PREVIEW_LENGTH)); // 写入错误信息预览。
         return vo; // 分页列表不返回完整大字段。
+    }
+
+    private ToolCallLogVO toExportPreviewVO(ToolCallLog logRecord) {
+        if (logRecord == null) { // 空实体无法转换。
+            return null; // 直接返回空。
+        }
+        ToolCallLogVO vo = buildBaseVO(logRecord); // 先写入导出基础字段。
+        vo.setUserMessagePreview(preview(logRecord.getUserMessage(), EXPORT_USER_MESSAGE_PREVIEW_LENGTH)); // 预览模式用户输入最多 200 字。
+        vo.setArgumentsPreview(preview(logRecord.getArgumentsJson(), EXPORT_ARGUMENTS_PREVIEW_LENGTH)); // 预览模式参数最多 300 字。
+        vo.setResultPreview(preview(logRecord.getResultJson(), EXPORT_RESULT_PREVIEW_LENGTH)); // 预览模式结果最多 500 字。
+        vo.setFinalAnswerPreview(preview(logRecord.getFinalAnswer(), EXPORT_FINAL_ANSWER_PREVIEW_LENGTH)); // 预览模式最终回答最多 300 字。
+        vo.setErrorMessagePreview(preview(logRecord.getErrorMessage(), EXPORT_ERROR_MESSAGE_PREVIEW_LENGTH)); // 预览模式错误信息最多 300 字。
+        return vo; // 导出预览对象不携带完整大字段。
     }
 
     private ToolCallLogVO toDetailVO(ToolCallLog logRecord) {
