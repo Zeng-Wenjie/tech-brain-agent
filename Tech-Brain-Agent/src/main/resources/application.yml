@@ -11,8 +11,8 @@ spring:
       # 文件上传大小限制配置
   servlet:
     multipart:
-      max-file-size: 10MB      # 限制单个文件最大为 10MB (原来默认才 1MB)
-      max-request-size: 100MB   # 限制单次请求的总大小为 50MB
+      max-file-size: 20MB      # 限制单个文件最大为 20MB，和 techbrain.file.max-size-mb 保持一致
+      max-request-size: 100MB   # 限制单次请求的总大小为 100MB
 
   data:
     redis:
@@ -68,3 +68,28 @@ milvus:
   port: 19530
   collection-name: article_vector
   dimension: 512
+
+techbrain:
+  file:
+    upload-dir: ./data/uploads
+    max-size-mb: 20
+    allowed-extensions:
+      - pdf
+      - doc
+      - docx
+      - txt
+      - md
+      - png
+      - jpg
+      - jpeg
+      - webp
+      - py
+    allowed-mime-types:
+      - application/pdf
+      - application/msword
+      - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+      - text/plain
+      - text/markdown
+      - image/png
+      - image/jpeg
+      - image/webp
