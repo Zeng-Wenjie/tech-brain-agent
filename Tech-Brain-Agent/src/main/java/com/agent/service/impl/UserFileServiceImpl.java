@@ -11,6 +11,7 @@ import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -19,6 +20,8 @@ import org.springframework.web.multipart.MultipartFile;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -44,8 +47,8 @@ import java.util.stream.Collectors;
  * MD5 计算、user_file 表写入、单条查询和列表查询。</p>
  * <p>调用链：UserFileController -> uploadFile -> 本地文件系统 + saveUserFile -> UserFileMapper -> user_file 表；
  * 后续文件详情或列表接口 -> getByIdAndUserId/listByUserId，并始终叠加 userId 与 status=1 做用户隔离。</p>
- * <p>边界说明：本实现只保存文件本体和元数据，不创建或修改数据库结构，不执行 SQL 脚本，不解析文件内容，
- * 不提供下载接口，不接入 AI、RAG、Tool Calling、向量化或 Milvus。</p>
+ * <p>边界说明：本实现只保存文件本体和元数据，并提供下载/预览前的权限查询；不创建或修改数据库结构，不执行 SQL 脚本，
+ * 不解析文件内容，不接入 AI、RAG、Tool Calling、向量化或 Milvus。</p>
  */
 @Slf4j // 输出 [UserFile] 前缀日志，避免打印完整 storagePath 等过长敏感内容。
 @Service // 注册为 Spring Bean，供后续文件业务注入使用。
@@ -146,7 +149,7 @@ public class UserFileServiceImpl extends ServiceImpl<UserFileMapper, UserFile> i
             throw new IllegalArgumentException("未登录或登录状态失效"); // 交给 Controller 返回统一未登录错误。
         }
         if (id == null) { // 文件 ID 为空时无法定位文件。
-            return null; // 由 Controller 转为文件不存在或无权访问。
+            throw new IllegalArgumentException("文件不存在或无权访问"); // 统一隐藏不存在和越权细节。
         }
 
         log.info("[UserFile] get file detail, userId: {}, fileId: {}", currentUserId, id); // 只打印用户 ID 和文件 ID。
@@ -155,7 +158,175 @@ public class UserFileServiceImpl extends ServiceImpl<UserFileMapper, UserFile> i
                 .eq(UserFile::getUserId, currentUserId) // 强制当前用户隔离。
                 .eq(UserFile::getStatus, NORMAL_STATUS) // 只查询正常状态文件。
                 .last("LIMIT 1")); // 明确只取一条。
-        return toVO(userFile); // 查不到时返回 null，查到时不包含 storagePath。
+        if (userFile == null) { // 查不到表示文件不存在或不属于当前用户。
+            throw new IllegalArgumentException("文件不存在或无权访问"); // 不泄露其它用户文件是否存在。
+        }
+        return toVO(userFile); // 查到时返回不包含 storagePath 的安全 VO。
+    }
+
+    @Override // 下载当前登录用户自己的原始文件。
+    public void downloadFile(Long id, HttpServletResponse response) {
+        writeFileResponse(id, response, false); // attachment 方式写入文件响应。
+    }
+
+    @Override // 预览当前登录用户自己的原始文件。
+    public void previewFile(Long id, HttpServletResponse response) {
+        writeFileResponse(id, response, true); // inline 方式写入文件响应。
+    }
+
+    @Override // 下载或预览前查询当前用户可访问的文件实体。
+    public UserFile getFileForAccess(Long id) {
+        Long currentUserId = UserContext.getUserId(); // 文件访问必须绑定当前登录用户。
+        if (currentUserId == null) { // 没有登录用户时不允许访问文件。
+            throw new IllegalArgumentException("未登录或登录状态失效"); // 由 Controller 写入统一错误响应。
+        }
+        if (id == null) { // 文件 ID 为空无法定位文件。
+            throw new IllegalArgumentException("文件ID不能为空"); // 由 Controller 写入统一错误响应。
+        }
+        UserFile userFile = getOne(new LambdaQueryWrapper<UserFile>() // 按访问权限查询文件实体。
+                .eq(UserFile::getId, id) // 限定文件 ID。
+                .eq(UserFile::getUserId, currentUserId) // 强制当前用户隔离。
+                .eq(UserFile::getStatus, NORMAL_STATUS) // 只允许访问正常状态文件。
+                .last("LIMIT 1")); // 明确只取一条。
+        if (userFile == null) { // 查不到表示不存在或无权访问。
+            throw new IllegalArgumentException("文件不存在或无权访问"); // 不泄露其它用户文件是否存在。
+        }
+        return userFile; // 后端内部使用，可读取 storagePath；不会直接返回给前端 JSON。
+    }
+
+    private void writeFileResponse(Long id, HttpServletResponse response, boolean inline) {
+        Long currentUserId = UserContext.getUserId(); // 文件访问用户必须来自登录上下文。
+        if (currentUserId == null) { // 未登录时不进入文件读取流程。
+            writeJsonError(response, HttpServletResponse.SC_UNAUTHORIZED, "未登录或登录状态失效"); // 返回统一未登录错误。
+            return; // 结束响应。
+        }
+
+        if (inline) { // inline 表示预览。
+            log.info("[UserFile] preview file, userId: {}, fileId: {}", currentUserId, id); // 不打印 storagePath。
+        } else { // attachment 表示下载。
+            log.info("[UserFile] download file, userId: {}, fileId: {}", currentUserId, id); // 不打印 storagePath。
+        }
+
+        try {
+            UserFile userFile = getFileForAccess(id); // 按 id + userId + status=1 查询可访问文件实体。
+            Path filePath = resolveSafeFilePath(userFile); // 校验 storagePath 在 uploadDir 下且物理文件存在。
+            String contentType = resolveContentType(userFile); // 根据 MIME 或扩展名确定响应 Content-Type。
+            String originalName = resolveResponseFileName(userFile); // 下载/预览文件名使用 originalName。
+
+            response.reset(); // 清理可能已有的默认响应头。
+            response.setContentType(contentType); // 设置文件原始类型，不转换文件内容。
+            response.setHeader("Content-Disposition", buildContentDisposition(inline, originalName)); // inline 或 attachment 区分预览/下载。
+            response.setHeader("Cache-Control", "no-cache"); // 不缓存受权限保护的文件响应。
+            response.setContentLengthLong(Files.size(filePath)); // 设置响应文件大小。
+            Files.copy(filePath, response.getOutputStream()); // 流式输出文件，避免一次性读入内存。
+            response.getOutputStream().flush(); // 刷新响应流。
+        } catch (IllegalArgumentException e) {
+            writeJsonError(response, resolveAccessErrorStatus(e.getMessage()), e.getMessage()); // 权限或参数错误转换为 JSON。
+        } catch (FileAccessException e) {
+            writeJsonError(response, e.getStatus(), e.getMessage()); // 文件路径或物理文件错误转换为 JSON。
+        } catch (Exception e) {
+            log.error("[UserFile] write file response failed, userId: {}, fileId: {}", currentUserId, id, e); // 记录异常，不打印路径。
+            writeJsonError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "文件读取失败，请稍后重试"); // 返回友好错误。
+        }
+    }
+
+    private Path resolveSafeFilePath(UserFile userFile) {
+        if (userFile == null) { // 权限查询未返回文件。
+            throw new FileAccessException(HttpServletResponse.SC_NOT_FOUND, "文件不存在或无权访问"); // 不泄露其它用户文件。
+        }
+        if (isBlank(userFile.getStoragePath())) { // 数据库记录缺少物理路径。
+            throw new FileAccessException(HttpServletResponse.SC_NOT_FOUND, "文件不存在"); // 不暴露服务器路径细节。
+        }
+
+        Path basePath = resolveBasePath(); // 上传根目录绝对路径。
+        Path filePath = Paths.get(userFile.getStoragePath()).toAbsolutePath().normalize(); // 数据库存储路径绝对化并归一化。
+        if (!filePath.startsWith(basePath)) { // 文件路径必须仍位于 uploadDir 下。
+            throw new FileAccessException(HttpServletResponse.SC_FORBIDDEN, "文件不存在或无权访问"); // 拒绝路径穿越或非法路径。
+        }
+        if (!Files.exists(filePath) || !Files.isRegularFile(filePath)) { // 文件不存在或不是普通文件。
+            throw new FileAccessException(HttpServletResponse.SC_NOT_FOUND, "文件不存在"); // 不暴露真实路径。
+        }
+        return filePath; // 返回可安全读取的物理文件路径。
+    }
+
+    private String resolveContentType(UserFile userFile) {
+        String mimeType = trimToNull(userFile == null ? null : userFile.getMimeType()); // 优先读取数据库 MIME 类型。
+        if (mimeType != null && !"application/octet-stream".equalsIgnoreCase(mimeType)) { // 有明确 MIME 时直接使用。
+            return mimeType; // 保持上传时记录的原始类型。
+        }
+
+        String fileExt = normalizeFileExt(userFile == null ? null : userFile.getFileExt()); // MIME 缺失或宽泛时按扩展名兜底。
+        return switch (fileExt) {
+            case "pdf" -> "application/pdf"; // PDF 预览/下载类型。
+            case "png" -> "image/png"; // PNG 图片类型。
+            case "jpg", "jpeg" -> "image/jpeg"; // JPEG 图片类型。
+            case "webp" -> "image/webp"; // WebP 图片类型。
+            case "txt" -> "text/plain;charset=UTF-8"; // 文本类型。
+            case "md" -> "text/markdown;charset=UTF-8"; // Markdown 类型。
+            case "py" -> "text/x-python;charset=UTF-8"; // Python 代码类型。
+            case "java" -> "text/x-java-source;charset=UTF-8"; // Java 代码类型。
+            case "js" -> "application/javascript;charset=UTF-8"; // JavaScript 代码类型。
+            case "json" -> "application/json;charset=UTF-8"; // JSON 类型。
+            case "xml" -> "application/xml;charset=UTF-8"; // XML 类型。
+            case "html" -> "text/html;charset=UTF-8"; // HTML 类型。
+            case "css" -> "text/css;charset=UTF-8"; // CSS 类型。
+            case "doc" -> "application/msword"; // Word 旧格式。
+            case "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"; // Word OOXML 格式。
+            default -> "application/octet-stream"; // 未知类型按二进制流返回，不拒绝访问。
+        };
+    }
+
+    private String buildContentDisposition(boolean inline, String originalName) {
+        String dispositionType = inline ? "inline" : "attachment"; // preview 使用 inline，download 使用 attachment。
+        return dispositionType + "; filename*=UTF-8''" + encodeFileName(originalName); // 使用 RFC 5987 兼容中文文件名。
+    }
+
+    private String encodeFileName(String fileName) {
+        String safeFileName = isBlank(fileName) ? "file" : fileName.trim(); // 文件名缺失时兜底。
+        return URLEncoder.encode(safeFileName, StandardCharsets.UTF_8).replaceAll("\\+", "%20"); // 中文和空格按 UTF-8 百分号编码。
+    }
+
+    private String resolveResponseFileName(UserFile userFile) {
+        if (userFile == null || isBlank(userFile.getOriginalName())) { // 原始文件名缺失时兜底。
+            return "file"; // 返回安全默认文件名。
+        }
+        String normalizedName = userFile.getOriginalName().replace('\\', '/').trim(); // 兼容历史文件名中的路径分隔符。
+        int lastSlashIndex = normalizedName.lastIndexOf('/'); // 只取最后一级文件名。
+        String fileName = lastSlashIndex >= 0 ? normalizedName.substring(lastSlashIndex + 1) : normalizedName; // 去掉潜在路径片段。
+        return isBlank(fileName) ? "file" : fileName.trim(); // 使用 originalName 的安全文件名作为下载/预览文件名。
+    }
+
+    private int resolveAccessErrorStatus(String message) {
+        if ("未登录或登录状态失效".equals(message)) { // 未登录错误。
+            return HttpServletResponse.SC_UNAUTHORIZED; // 返回 401。
+        }
+        if ("文件不存在或无权访问".equals(message)) { // 文件不存在或越权。
+            return HttpServletResponse.SC_NOT_FOUND; // 返回 404，避免暴露越权信息。
+        }
+        return HttpServletResponse.SC_BAD_REQUEST; // 其它参数错误返回 400。
+    }
+
+    private void writeJsonError(HttpServletResponse response, int status, String message) {
+        if (response.isCommitted()) { // 响应已提交时无法再写 JSON。
+            return; // 直接返回。
+        }
+        try {
+            response.reset(); // 清理已有响应头。
+            response.setStatus(status); // 设置 HTTP 状态码。
+            response.setCharacterEncoding(StandardCharsets.UTF_8.name()); // 使用 UTF-8 输出中文。
+            response.setContentType("application/json; charset=UTF-8"); // 错误响应统一 JSON。
+            response.getWriter().write("{\"code\":" + status + ",\"message\":\"" + escapeJson(message) + "\"}"); // 写入项目统一结构。
+            response.getWriter().flush(); // 刷新错误响应。
+        } catch (IOException e) {
+            log.warn("[UserFile] write error response failed"); // 不打印路径或文件内容。
+        }
+    }
+
+    private String escapeJson(String value) {
+        if (value == null) { // 空错误信息兜底。
+            return ""; // 返回空字符串。
+        }
+        return value.replace("\\", "\\\\").replace("\"", "\\\""); // 转义 JSON 字符串中的反斜杠和双引号。
     }
 
     @Override // 保存用户文件基础元数据。
@@ -438,7 +609,11 @@ public class UserFileServiceImpl extends ServiceImpl<UserFileMapper, UserFile> i
     }
 
     private String normalizeFileExt(String fileExt) {
-        String normalizedExt = fileExt.trim().toLowerCase(Locale.ROOT); // 扩展名统一小写。
+        String normalizedExt = trimToNull(fileExt); // 标准化扩展名，空值直接走兜底逻辑。
+        if (normalizedExt == null) { // 缺少扩展名时返回空字符串。
+            return ""; // 下载/预览时会按 application/octet-stream 处理。
+        }
+        normalizedExt = normalizedExt.toLowerCase(Locale.ROOT); // 扩展名统一小写。
         return normalizedExt.startsWith(".") ? normalizedExt.substring(1) : normalizedExt; // 兼容前端传 .pdf。
     }
 
@@ -516,6 +691,20 @@ public class UserFileServiceImpl extends ServiceImpl<UserFileMapper, UserFile> i
             Files.deleteIfExists(path); // 尽量删除半残文件或数据库失败后的物理文件。
         } catch (IOException cleanupException) {
             log.warn("[UserFile] cleanup physical file failed"); // 不打印真实路径，避免泄露服务器目录。
+        }
+    }
+
+    private static class FileAccessException extends RuntimeException { // 文件响应阶段的受控异常。
+
+        private final int status; // 要写入响应的 HTTP 状态码。
+
+        private FileAccessException(int status, String message) {
+            super(message); // 保存错误提示。
+            this.status = status; // 保存状态码。
+        }
+
+        private int getStatus() {
+            return status; // 返回 HTTP 状态码。
         }
     }
 

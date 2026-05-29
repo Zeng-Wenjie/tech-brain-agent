@@ -84,6 +84,12 @@ techbrain:
       - jpeg
       - webp
       - py
+      - java
+      - js
+      - json
+      - xml
+      - html
+      - css
     allowed-mime-types:
       - application/pdf
       - application/msword
@@ -93,3 +99,12 @@ techbrain:
       - image/png
       - image/jpeg
       - image/webp
+      - text/x-python
+      - text/x-java-source
+      - application/javascript
+      - text/javascript
+      - application/json
+      - application/xml
+      - text/xml
+      - text/html
+      - text/css
