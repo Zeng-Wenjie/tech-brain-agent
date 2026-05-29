@@ -1,0 +1,193 @@
+新技术： Milvus 或者 ChromaDB。Token 计费拦截与审计。
+
+双写一致：用异步双写更新（Async Write-Through）。
+
+技术细节： 在拦截器（Interceptor）里解析出 Token 后的第一件事，应该是把用户信息存入 ThreadLocal。这样你后续的所有 Service 层（包括那个异步双写）都能直接拿到当前操作者，而不需要在方法参数里传来传去。
+
+面试杀手锏： 如果面试官问你：“如果异步更新向量库失败了怎么办？”
+你可以从容回答：“我设计了失败重试机制（或者简单的日志记录），因为主库 MySQL 已经成功了，我随时可以根据 MySQL 的数据重新触发向量化。这保证了系统的最终一致性，同时兼顾了极高的响应性能。”
+
+
+模块：
+全局异常处理器(已通)
+Agent：问答（已通），显示是否保存笔记（已通），双写一致性(已通)，聊天会话持久化(已通)，删除会话，上下文有联系多轮对话(已通),AI保存(已通)
+Notes:CURD(已通),分页查询（pagehelper插件）(已通)，批量删除（已通）
+login：JWT(已通)，拦截器(已通)，注册(已通)，密码加密(已通)，ThreadLocal上下文传递(已通)，用户信息(已通)，图片上传OSS(已通)
+Mysql:用Redis做Cache(已通)
+部署Docker,兼容手机端游览器
+微服务？
+
+day10:
+后端：构建数据库->搭建Spring Boot实现基础的CRUD操作->用langchain4j引入GeminiAPI实现问答功能->搭建笔记模块，用langchain4j引入本地Bge模型和Redis向量数据库(用Doker拉起)->实现将Ai回复同时存进本地数据库和Redis向量库->实现真实的 RAG（检索增强生成），把原来的“直传直答”模式，升级为“先查资料再回答”的模式(提问向量化、Redis 检索召回、构建增强提示词（Prompt）->给AOP存量做切断，防止内容过多无法保存->正确将前后端接口对齐->用MP的Lmabda实现了根据用户ID批量删除和单删->根据用户ID新增->实现根据用户ID进行分页查询
+->实现登录接口，JWT令牌，拦截器+ThreadLocal->实现注册基本接口-> 实现参数校验和BCrypt 加盐加密->实现添加用户信息功能->实现用户头像上传功能->修复头像上传没入数据库的BUG，修复User表修改时间为NULL的BUG，，修复图片太小无法上传的BUG->配置Redis 序列化,用Redis做Cache,对用户信息的更新和查询实现双写一致(延迟双删)->实现代码优化->依赖模块整理->修改密码->AI总结->迁移Milvus并实现笔记向量双写一致性->实现聊天会话持久化
+
+前端：构建前端页面：用了VUE3+Vite->将前端聊天界面联通后端大模型->优化Agent 交互区，引入 marked 库来解析 Markdown->在笔记去左上角实现滑出的交互面板，
+使用 Element Plus 的抽屉组件（Drawer）不会破坏页面布局->前端笔记区布局：Element Plus 的 <el-card>、<el-row>、<el-col> 和 <el-pagination> 来实现这个 3x3 的“卡片式网格（Card Grid）+ 底部动态分页”布局->卡片实现“双击放大、内部滚动”->与后端联调实现CURD->点击 AI 回复框的“保存” -> 自动弹出“新建笔记”的弹窗 -> AI 的回复已经自动填入了内容框里 -> 你只需顺手起个标题，点击确认，瞬间完成 MySQL + Redis 向量库的双写！->正确将前面端接口对齐->添加批量删除，改变了一点页面布局->配置分页查询接口->实现登录和注册页面并进行联调后端，解决了跨域问题，修复了一些BUG->实现页面左上角滑块和个人信息页面->
+实现AI总结按钮->在个人信息中心加入修改密码，点击弹出修改页面
+
+Axios是什么，为啥要引入Axios；RAG是不是只会去向量数据库检索，不会去本地数据库检索
+；我这次解决了哪些跨域问题
+1. 项目名称：Tech-Brain（智能技术私有知识库）
+核心逻辑：
+用户上传 Markdown 或纯文本的技术笔记，系统将其向量化存储。当用户提问时，Agent 先从私有库中检索相关内容，再结合大模型给出精准回答，彻底解决大模型“胡说八道”的问题。
+
+2. 技术栈设计（贴合你的后端体系）
+基础框架： Spring Boot 3.x
+
+数据库： MySQL + MyBatis-Plus（存储文档元数据：标题、分类、路径、上传时间）
+
+向量存储： Redis（Redis 7.0+ 支持向量检索，这能展示你对 Redis 的深度应用，不仅是做缓存，还能做向量数据库）
+
+AI 框架： LangChain4j（Java 开发 Agent 的首选，对 RAG 流程封装得非常好）
+
+工具： Docker（用于一键启动 Redis 和 MySQL 环境）
+
+3. 三步走开发计划
+第一阶段：核心业务 CRUD（1-2 天）
+实现一个最基础的文章管理系统。
+
+编写 article 表，记录笔记的 ID、标题、分类和文本内容。
+
+使用 MyBatis-Plus 实现基础的上传、列表查询、删除接口。
+RAG 流程实现（3-4 天）
+这是项目的灵魂，利用 LangChain4j 将业务与 AI 结合。
+
+文本切片 (Chunking)： 将长篇的技术笔记切成 500 字左右的小块。
+
+向量化 (Embedding)： 调用大模型接口（如智谱、OpenAI 或本地模型）将切片转化为数字向量。
+
+向量入库： 将向量和对应的文本块存入 Redis。
+
+检索与生成： 当用户提问时，先在 Redis 中计算向量相似度，找出最匹配的 3 条笔记，丢给大模型总结。
+
+Agent 交互优化（2 天）
+会话管理： 利用 Redis 存储 chat_history，让 Agent 具备上下文记忆。
+
+前端交互： 搞一个极简的聊天界面（甚至可以是 Swagger/Postman 演示），支持用户询问“我之前记的关于 Redis 分布式锁的配置在哪？”
+
+
+那我改变一下思路，是这样，比如我发了个请求“给我100道JAVA八股文”，后端先去我的数据库找，没有再去Redis找，还是没有才向AI问，等到答案后在前端可以选择是否加入你的笔记，加入笔记就把数据先存入Redis,再持久化到我的数据库中，最后加入了前端的笔记界面，笔记界面就是有传统CRDU功能，而且可以自命标题。这样这个项目我就可以自己用来做笔记学习，也可以拿去面试
+
+1. 业务逻辑全流程设计
+请求发起： 你输入“给我100道JAVA八股文”。
+
+第一步：MySQL 检索（精确匹配）： * 后端先查 article 表（或者 note 表），利用 LIKE 模糊匹配或者全文索引查标题。
+
+如果有匹配且质量高的内容，直接返回。
+
+第二步：Redis 向量检索（语义匹配）：
+
+如果 MySQL 没查到，将你的请求转化为向量，去 Redis 向量库里做相似度搜索。
+
+这能帮你找到那些“标题不完全对，但内容意思很接近”的笔记。
+
+第三步：AI 生成（兜底逻辑）：
+
+如果前两步都没找到满意的内容，再调用 Gemini。
+
+第四步：前端交互与入库：
+
+前端展示 AI 生成的内容，并提供一个“加入笔记”按钮。
+
+点击保存时：
+
+MySQL： 存入 article 表，保存你自命的标题、原始内容、分类等。
+
+Redis： 调用 BGE 模型把内容转成向量，存入向量库，方便下次搜索。
+
+//拉起“带向量检索功能的 Redis”
+docker run -d --name redis-stack-server -p 6379:6379 redis/redis-stack-server:latest
+
+查询RedisCache里的数据
+redis-cli --raw
+select 1
+keys user:*
+get user:4
+ttl user:4 //查看还有多久过期
+
+
+//查询Redis向量库里的数据
+redis-cli --raw
+keys *
+HGETALL key   //hash
+JSON.GET key  //JSON
+FLUSHALL      //清空
+
+微服务：把 RAG 检索做成一个独立服务、把用户鉴权做成网关拦截
+
+
+Git：
+git init
+git add .
+git commit -m "创建一个基础页面"
+上传远程仓库：
+git remote add origin https://gitee.com/jewenz/tech-brain.git
+//将本地代码推送到远程
+git push -u origin main
+//版本回滚
+git reset --hard Commit ID
+//回滚远程仓库记录
+git push -f origin main
+//查看ID
+git log --oneline
+个人独立开发 / 自己的分支（当前场景）： 使用 git reset --hard。它的特点是“抹除历史，时光倒流”。
+
+//查看当前分支名
+git branch
+//同时上传Gitee和GitHub
+git add .
+git commit -m "更新项目功能"
+git push origin main
+git push github main
+
+
+
+
+
+团队协作的公共分支（如 main/master）： 必须使用 git revert <Commit ID>。它的特点是“生成一次新的提交，这个新提交的内容刚好把之前的修改抵消掉”。它的历史记录是往前走的，不会破坏别人已经拉取的分支。
+
+
+引入 marked 库来解析 Markdown
+在项目根目录下cmd
+npm install marked
+
+
+带 Markdown 格式的原始文本存进 MySQL 和 Redis 向量库是非常标准的做法。因为这样你的知识库保留了完整的层级结构（比如标题、加粗、代码块），后续 RAG 检索和二次生成的效果最好！
+
+
+遇到困难:
+0.接入国外的向量模型一直失败，在JVM里设置了代理也不行
+	解决方法：在阿里云调用本地的BGE模型
+1.数据已经存入Redis向量数据库，但RAG检索不到，直接将提问发给了大模型
+	找到问题：“旧索引未清理”与“配置维度不匹配”
+	解决方案，清空Redis的数据，重新建立索引
+2.只把AI回复的数据纯入本地数据库，没存入Redis
+	解决方案：前后端接口没配置好
+3.AOP日志记录，内容太长无发保存
+	解决方案：加判断，直接阶段内容进行保存
+4.配置mybatisPlus分页插件时，找不到 PaginationInnerInterceptor
+	找到问题：因为 MyBatis-Plus 从 3.5.9 版本开始做了一个巨大的架构调整：他们把插件部分变成了可选依赖。
+	也就是说，在高版本里，如果你要用分页插件，还要引入解析器依赖mybatis-plus-jsqlparser
+
+5.跨域出现问题：登录成功拿到了 Token，但跳到主页发请求时直接报“服务器连接异常”，后端日志显示 token 为空。
+原因：Header 的 OPTIONS 预检请求没有带Token,拦截器直接把它毙了
+解决方案：在拦截器最前面直接将 OPTIONS 预检请求放行
+
+6.原生 Axios (请求拦截器失效)
+原因： 封装了带有自动塞 Token 功能的 request.js 实例
+解决方案：把所有业务页面里的axios，换成request
+
+
+在Dodker里清理数据指令：
+docker exec -it tech-brain-redis-stack redis-cli -n 0 FLUSHDB
+docker exec -it tech-brain-redis-stack redis-cli --raw -n 0 DBSIZE
+docker exec -it tech-brain-redis-stack redis-cli -n 1 FLUSHDB
+docker exec -it tech-brain-redis-stack redis-cli --raw -n 1 DBSIZE
+
+//查看索引
+docker exec -it tech-brain-redis-stack redis-cli -n 0 FT._LIST
+//查看内容
+docker exec -it tech-brain-redis-stack redis-cli --raw -n 0 JSON.GET embedding:article:2
+
+启动 Milvus：
+docker compose -p milvus up -d
