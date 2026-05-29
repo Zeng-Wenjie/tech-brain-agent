@@ -1,6 +1,8 @@
 package com.agent.service;
 
 import com.agent.entity.UserFile;
+import com.agent.entity.dto.PageDTO;
+import com.agent.entity.dto.UserFilePageRequest;
 import com.agent.entity.vo.UserFileVO;
 import com.baomidou.mybatisplus.extension.service.IService;
 import org.springframework.web.multipart.MultipartFile;
@@ -18,6 +20,10 @@ import java.util.List;
 public interface UserFileService extends IService<UserFile> { // 继承 MyBatis-Plus 通用 Service 能力。
 
     UserFileVO uploadFile(MultipartFile file); // 上传用户文件到本地目录，写入 user_file 表并返回安全基础信息。
+
+    PageDTO<UserFileVO> pageMyFiles(UserFilePageRequest request); // 分页查询当前登录用户自己的正常文件。
+
+    UserFileVO getMyFileDetail(Long id); // 查询当前登录用户自己的文件详情。
 
     Long saveUserFile(UserFile userFile); // 保存用户文件基础元数据并返回数据库自增 ID。
 

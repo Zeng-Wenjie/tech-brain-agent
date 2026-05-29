@@ -2,11 +2,14 @@ package com.agent.service.impl;
 
 import com.agent.config.FileUploadProperties;
 import com.agent.entity.UserFile;
+import com.agent.entity.dto.PageDTO;
+import com.agent.entity.dto.UserFilePageRequest;
 import com.agent.entity.vo.UserFileVO;
 import com.agent.mapper.UserFileMapper;
 import com.agent.service.UserFileService;
 import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -51,6 +54,12 @@ public class UserFileServiceImpl extends ServiceImpl<UserFileMapper, UserFile> i
     private static final int DEFAULT_MAX_SIZE_MB = 20; // 默认单文件最大 20MB。
 
     private static final String DEFAULT_UPLOAD_DIR = "./data/uploads"; // 默认本地上传根目录。
+
+    private static final int DEFAULT_PAGE_NUM = 1; // 默认第一页。
+
+    private static final int DEFAULT_PAGE_SIZE = 10; // 默认每页 10 条。
+
+    private static final int MAX_PAGE_SIZE = 100; // 文件分页最大每页 100 条。
 
     private static final int NORMAL_STATUS = 1; // 正常文件状态，查询时只返回 status=1 的记录。
 
@@ -109,6 +118,44 @@ public class UserFileServiceImpl extends ServiceImpl<UserFileMapper, UserFile> i
                     userId, originalName, e); // 文件系统或数据库失败记录堆栈，便于排查。
             throw e; // 交给 Controller 转换为统一错误格式。
         }
+    }
+
+    @Override // 分页查询当前登录用户自己的文件。
+    public PageDTO<UserFileVO> pageMyFiles(UserFilePageRequest request) {
+        Long currentUserId = UserContext.getUserId(); // 用户隔离只信任登录上下文。
+        if (currentUserId == null) { // 没有登录用户时不允许查询文件列表。
+            throw new IllegalArgumentException("未登录或登录状态失效"); // 交给 Controller 返回统一未登录错误。
+        }
+
+        UserFilePageRequest safeRequest = request == null ? new UserFilePageRequest() : request; // 请求为空时使用默认查询参数。
+        log.info("[UserFile] page my files, userId: {}", currentUserId); // 只打印用户 ID，不打印筛选详情或路径。
+        Page<UserFile> page = new Page<>(resolvePageNum(safeRequest.getPageNum()), resolvePageSize(safeRequest.getPageSize())); // 构造 MP 分页对象。
+        Page<UserFile> resultPage = page(page, buildMyFilePageWrapper(safeRequest, currentUserId)); // 执行分页查询。
+
+        PageDTO<UserFileVO> pageDTO = new PageDTO<>(); // 封装项目统一分页结果。
+        pageDTO.setTotal(resultPage.getTotal()); // 设置总记录数。
+        pageDTO.setPages(resultPage.getPages()); // 设置总页数。
+        pageDTO.setList(resultPage.getRecords().stream().map(this::toVO).collect(Collectors.toList())); // 转为不含 storagePath 的 VO。
+        return pageDTO; // 返回分页结果。
+    }
+
+    @Override // 查询当前登录用户自己的文件详情。
+    public UserFileVO getMyFileDetail(Long id) {
+        Long currentUserId = UserContext.getUserId(); // 用户隔离只信任登录上下文。
+        if (currentUserId == null) { // 没有登录用户时不允许查询详情。
+            throw new IllegalArgumentException("未登录或登录状态失效"); // 交给 Controller 返回统一未登录错误。
+        }
+        if (id == null) { // 文件 ID 为空时无法定位文件。
+            return null; // 由 Controller 转为文件不存在或无权访问。
+        }
+
+        log.info("[UserFile] get file detail, userId: {}, fileId: {}", currentUserId, id); // 只打印用户 ID 和文件 ID。
+        UserFile userFile = getOne(new LambdaQueryWrapper<UserFile>() // 按当前用户和文件 ID 查询。
+                .eq(UserFile::getId, id) // 限定文件 ID。
+                .eq(UserFile::getUserId, currentUserId) // 强制当前用户隔离。
+                .eq(UserFile::getStatus, NORMAL_STATUS) // 只查询正常状态文件。
+                .last("LIMIT 1")); // 明确只取一条。
+        return toVO(userFile); // 查不到时返回 null，查到时不包含 storagePath。
     }
 
     @Override // 保存用户文件基础元数据。
@@ -318,6 +365,9 @@ public class UserFileServiceImpl extends ServiceImpl<UserFileMapper, UserFile> i
     }
 
     private UserFileVO toVO(UserFile userFile) {
+        if (userFile == null) { // 查询不到记录时直接返回空。
+            return null; // Controller 会转换成统一错误提示。
+        }
         UserFileVO vo = new UserFileVO(); // 构造安全返回对象。
         vo.setId(userFile.getId()); // 返回文件 ID。
         vo.setOriginalName(userFile.getOriginalName()); // 返回原始文件名。
@@ -327,8 +377,69 @@ public class UserFileServiceImpl extends ServiceImpl<UserFileMapper, UserFile> i
         vo.setFileSize(userFile.getFileSize()); // 返回文件大小。
         vo.setStorageType(userFile.getStorageType()); // 返回存储类型。
         vo.setAccessUrl(userFile.getAccessUrl()); // 当前可为空。
+        vo.setMd5(userFile.getMd5()); // 返回文件 MD5，便于前端展示或去重提示。
+        vo.setStatus(userFile.getStatus()); // 返回文件状态。
+        vo.setUploadSource(userFile.getUploadSource()); // 返回上传来源。
         vo.setCreateTime(userFile.getCreateTime()); // 返回创建时间。
+        vo.setUpdateTime(userFile.getUpdateTime()); // 返回更新时间。
         return vo; // 不返回 storagePath。
+    }
+
+    private LambdaQueryWrapper<UserFile> buildMyFilePageWrapper(UserFilePageRequest request, Long currentUserId) {
+        LambdaQueryWrapper<UserFile> wrapper = new LambdaQueryWrapper<>(); // 构造文件分页查询条件。
+        wrapper.eq(UserFile::getUserId, currentUserId); // 强制只查当前用户文件。
+        wrapper.eq(UserFile::getStatus, NORMAL_STATUS); // 强制只查正常状态文件。
+
+        String keyword = trimToNull(request.getKeyword()); // 标准化文件名关键词。
+        if (keyword != null) { // keyword 非空且不是 Swagger 默认 string 时参与筛选。
+            wrapper.like(UserFile::getOriginalName, keyword); // 按 original_name 模糊查询。
+        }
+        String fileType = trimToNull(request.getFileType()); // 标准化文件分类。
+        if (fileType != null) { // fileType 有效时参与筛选。
+            wrapper.eq(UserFile::getFileType, fileType.toUpperCase(Locale.ROOT)); // 文件分类统一按大写匹配。
+        }
+        String fileExt = trimToNull(request.getFileExt()); // 标准化扩展名。
+        if (fileExt != null) { // fileExt 有效时参与筛选。
+            wrapper.eq(UserFile::getFileExt, normalizeFileExt(fileExt)); // 扩展名统一小写且去掉点。
+        }
+        if (request.getStartTime() != null) { // 上传开始时间有效时参与筛选。
+            wrapper.ge(UserFile::getCreateTime, request.getStartTime()); // create_time >= startTime。
+        }
+        if (request.getEndTime() != null) { // 上传结束时间有效时参与筛选。
+            wrapper.le(UserFile::getCreateTime, request.getEndTime()); // create_time <= endTime。
+        }
+        wrapper.orderByDesc(UserFile::getCreateTime); // 默认按上传时间倒序。
+        return wrapper; // 返回完整查询条件。
+    }
+
+    private long resolvePageNum(Integer pageNum) {
+        if (pageNum == null || pageNum < 1) { // 页码为空或小于 1 时使用默认值。
+            return DEFAULT_PAGE_NUM; // 默认第一页。
+        }
+        return pageNum; // 返回合法页码。
+    }
+
+    private long resolvePageSize(Integer pageSize) {
+        if (pageSize == null || pageSize < 1) { // 每页数量为空或非法时使用默认值。
+            return DEFAULT_PAGE_SIZE; // 默认每页 10 条。
+        }
+        return Math.min(pageSize, MAX_PAGE_SIZE); // 限制最大每页 100 条。
+    }
+
+    private String trimToNull(String value) {
+        if (isBlank(value)) { // null、空字符串和纯空白都不参与筛选。
+            return null; // 返回空表示忽略该条件。
+        }
+        String trimmedValue = value.trim(); // 去掉首尾空白。
+        if ("string".equalsIgnoreCase(trimmedValue)) { // Swagger 默认 string 不参与筛选。
+            return null; // 返回空表示忽略该条件。
+        }
+        return trimmedValue; // 返回有效筛选值。
+    }
+
+    private String normalizeFileExt(String fileExt) {
+        String normalizedExt = fileExt.trim().toLowerCase(Locale.ROOT); // 扩展名统一小写。
+        return normalizedExt.startsWith(".") ? normalizedExt.substring(1) : normalizedExt; // 兼容前端传 .pdf。
     }
 
     private String safeOriginalName(MultipartFile file) {
