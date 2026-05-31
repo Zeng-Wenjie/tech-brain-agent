@@ -1,15 +1,20 @@
 package com.agent.service.impl;
 
 import com.agent.entity.ChatMessage;
+import com.agent.entity.ChatMessageFile;
 import com.agent.entity.Conversation;
 import com.agent.entity.ConversationMemory;
+import com.agent.entity.UserFile;
 import com.agent.entity.dto.ChatRequestDTO;
 import com.agent.entity.dto.ToolCallLogCreateRequest;
 import com.agent.mapper.ChatMessageMapper;
 import com.agent.mapper.ConversationMapper;
+import com.agent.service.ChatMessageFileService;
 import com.agent.service.ChatMessageService;
 import com.agent.service.ConversationMemoryService;
 import com.agent.service.ToolCallLogService;
+import com.agent.service.UserFileService;
+import com.agent.toolcalling.context.ChatAttachedFileContext;
 import com.agent.toolcalling.core.ToolChatHistoryMessage;
 import com.agent.toolcalling.core.ToolCallingChatService;
 import com.agent.toolcalling.core.ToolCallingStreamCallback;
@@ -28,8 +33,10 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
@@ -55,6 +62,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     private static final int TITLE_MAX_LENGTH = 20;
     private static final int HISTORY_CONTEXT_LIMIT = 100; // 4.3 阶段读取并转换最近 6 条结构化历史，供Tool Calling最终回答阶段使用。
     private static final long SSE_TIMEOUT = 120000L; // SSE 连接最长等待时间，给 DeepSeek 流式生成保留足够窗口。
+    private static final String FILE_ONLY_MODEL_MESSAGE = "用户本轮上传了文件但没有输入文字。请根据附件元信息回应；如果需要读取文件内容，请调用 readFile 工具，未读取前不能编造文件内容。"; // 只发文件时给模型的内部隐藏上下文，不写入 chat_message。
 
     @Autowired
     private ConversationMapper conversationMapper;
@@ -70,6 +78,12 @@ public class ChatMessageServiceImpl implements ChatMessageService {
 
     @Autowired
     private ConversationMemoryService conversationMemoryService; // assistant 回复完成后异步线程内更新 conversation_memory 长期记忆。
+
+    @Autowired
+    private ChatMessageFileService chatMessageFileService; // 保存和加载 chat_message_file 附件关联。
+
+    @Autowired
+    private UserFileService userFileService; // 校验 /chat/message 本轮 fileIds 是否属于当前用户。
 
     @Override
     public SseEmitter sendMessage(ChatRequestDTO dto) {
@@ -91,36 +105,43 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     }
 
     private void doSendMessage(ChatRequestDTO dto, Long userId, SseEmitter emitter) {
-        validateRequest(dto); // POST /chat/message 的入口校验，后续流程默认 msg 可用。
-        String rawUserMessage = dto.getMsg(); // 当前轮用户原始输入，Tool Calling 工具路由只基于它判断。
+        validateRequest(dto); // POST /chat/message 的入口校验，允许“文字”或“附件”至少有一个。
+        String rawUserMessage = resolveUserMessage(dto); // 当前轮用户原始输入，兼容 msg/message 入参。
+        List<UserFile> attachedUserFiles = resolveAttachedUserFiles(dto, userId); // 校验本轮 fileIds 归属，后续用于关联表入库。
+        List<ChatAttachedFileContext> attachedFiles = toAttachedFileContexts(attachedUserFiles); // 转换为 Tool Calling 安全附件元信息。
+        String persistedUserMessage = resolvePersistedUserMessage(rawUserMessage); // 只保存用户真实输入，只发文件时保存空字符串。
+        String modelCurrentMessage = resolveModelCurrentMessage(rawUserMessage, attachedFiles); // 模型内部 currentMessage，必要时使用隐藏附件上下文。
         log.info("[ChatMessage] route: /chat/message"); // 明确前端真实聊天页当前走 POST /chat/message。
         log.debug("[ChatMessage] current answer mode: tool-calling-stream"); // answer mode固定，降级为DEBUG。
         log.info("[ChatMessage] user id: {}", userId); // 打印当前用户，确认后续历史和 Milvus 检索按用户隔离。
         log.debug("[ChatMessage] raw user message: {}", previewContent(rawUserMessage)); // 用户原文只在DEBUG打印短preview。
+        log.debug("[ChatMessage] attached file count: {}", attachedFiles.size()); // 附件数量只在DEBUG打印，不打印路径或内容。
 
         LocalDateTime now = LocalDateTime.now();
-        Conversation conversation = resolveConversation(dto, userId, now); // 无会话则新建，有会话则校验归属后复用。
+        Conversation conversation = resolveConversation(dto, userId, now, persistedUserMessage); // 无会话则新建，有会话则校验归属后复用。
         log.debug("[ChatMessage] conversation id: {}", conversation.getId()); // 会话ID细节降级为DEBUG。
 
         List<ChatMessage> historyMessages = loadRecentHistoryMessages(conversation.getId(), userId); // 保存本轮消息前读取历史，避免包含当前user输入。
         logHistoryMessages(historyMessages); // 打印历史数量和 preview，便于验证结构化历史读取能力。
-        List<ToolChatHistoryMessage> toolHistoryMessages = convertToToolHistoryMessages(historyMessages); // 转换为Tool Calling专用历史模型，不做字符串拼接。
+        List<ToolChatHistoryMessage> toolHistoryMessages = convertToToolHistoryMessages(historyMessages, userId); // 转换为Tool Calling专用历史模型，并注入历史附件元信息。
         logToolHistoryMessages(toolHistoryMessages); // 打印Tool历史数量和preview，便于验证4.3历史传入能力。
         String memorySummary = loadMemorySummary(conversation.getId(), userId); // 读取会话长期记忆摘要，失败时返回空字符串，不影响聊天主流程。
 
-        saveMessage(conversation.getId(), userId, ROLE_USER, rawUserMessage, now); // 用户消息先落库，assistant 消息在流式完成后落库。
+        Long userMessageId = saveMessage(conversation.getId(), userId, ROLE_USER, persistedUserMessage, now); // 用户消息只保存真实输入，拿到 messageId 后才能保存附件关联。
+        chatMessageFileService.saveMessageFiles(userMessageId, conversation.getId(), userId, attachedUserFiles); // 写入 chat_message_file，仅保存附件元信息。
 
         log.debug("[ChatMessage] use ToolCallingChatService.chatStream: true"); // 调用细节降级为DEBUG。
-        log.debug("[ChatMessage] tool-calling raw user message: {}", previewContent(rawUserMessage)); // 用户原文只在DEBUG打印短preview。
+        log.debug("[ChatMessage] tool-calling current message: {}", previewContent(modelCurrentMessage)); // 模型内部消息只在DEBUG打印短preview。
         String traceId = createTraceId(); // 每轮 /chat/message 生成一个traceId，所有工具调用共享。
         StringBuilder fullAnswer = new StringBuilder(); // 流式 token 先在内存聚合，完成后一次性保存 assistant 消息。
         ToolCallingRequestContext requestContext = new ToolCallingRequestContext(); // 构造工具执行期上下文，只供AiTool读取userId/conversationId。
         requestContext.setTraceId(traceId); // 将本轮traceId传入Tool Calling编排链路。
         requestContext.setUserId(userId); // 当前登录用户ID来自后端UserContext，不从前端或模型参数读取。
         requestContext.setConversationId(conversation.getId()); // 当前会话ID用于RAG命中后保存conversation级focus。
-        requestContext.setCurrentMessage(rawUserMessage); // 当前原始输入只给工具做focus动态匹配，不拼接历史或长期记忆。
+        requestContext.setCurrentMessage(modelCurrentMessage); // 当前模型内部消息；只发文件时使用隐藏上下文，不保存到 chat_message。
+        requestContext.setAttachedFiles(attachedFiles); // 本轮附件只传安全元信息，不包含 storagePath 或文件内容。
         requestContext.setToolCallLogRecorder(buildToolCallLogRecorder()); // 注入日志回调，避免Tech-Brain-Tool模块直接依赖Agent服务。
-        toolCallingChatService.chatStream(rawUserMessage, memorySummary, toolHistoryMessages, requestContext, new ToolCallingStreamCallback() { // 传入长期记忆、结构化历史和工具上下文，禁止恢复multiTurnQuestion。
+        toolCallingChatService.chatStream(modelCurrentMessage, memorySummary, toolHistoryMessages, requestContext, new ToolCallingStreamCallback() { // 传入长期记忆、结构化历史和工具上下文，禁止恢复multiTurnQuestion。
             @Override
             public void onToken(String token) { // 收到最终回答的增量 token。
                 try {
@@ -150,7 +171,8 @@ public class ChatMessageServiceImpl implements ChatMessageService {
                     sendError(emitter, e); // 保存消息或发送 done 失败时走统一错误事件。
                     return; // 主流程失败时不更新长期记忆，避免记录不完整回答。
                 }
-                updateConversationMemoryAfterAnswer(conversation.getId(), userId, rawUserMessage, fullAnswer.toString()); // SSE完成后再更新长期记忆，避免阻塞前端done。
+                updateConversationMemoryAfterAnswer(conversation.getId(), userId,
+                        buildMemoryUserMessage(persistedUserMessage, attachedFiles), fullAnswer.toString()); // SSE完成后再更新长期记忆，附件只写简短元信息。
             }
 
             @Override
@@ -174,16 +196,95 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     }
 
     private void validateRequest(ChatRequestDTO dto) {
-        if (dto == null || dto.getMsg() == null || dto.getMsg().trim().isEmpty()) {
-            throw new IllegalArgumentException("消息内容不能为空");
+        if (dto == null) { // 请求体不能为空。
+            throw new IllegalArgumentException("请输入内容或添加文件"); // 统一提示文字和附件至少需要一个。
+        }
+        if (!hasText(resolveUserMessage(dto)) && !hasFileIds(dto)) { // 用户没有输入文字，也没有选择文件。
+            throw new IllegalArgumentException("请输入内容或添加文件"); // 允许只发文件，但不允许空请求。
         }
     }
 
-    private Conversation resolveConversation(ChatRequestDTO dto, Long userId, LocalDateTime now) {
+    private String resolveUserMessage(ChatRequestDTO dto) {
+        return dto == null ? null : dto.getMsg(); // ChatRequestDTO 通过 @JsonAlias 兼容 message 入参，内部统一读取 msg。
+    }
+
+    private boolean hasFileIds(ChatRequestDTO dto) {
+        return dto != null && dto.getFileIds() != null && !dto.getFileIds().isEmpty(); // fileIds 非空即可视为本轮有附件输入。
+    }
+
+    private String resolvePersistedUserMessage(String rawUserMessage) {
+        return hasText(rawUserMessage) ? rawUserMessage : ""; // 只发文件时 chat_message.content 保存空字符串，不保存隐藏提示。
+    }
+
+    private String resolveModelCurrentMessage(String rawUserMessage, List<ChatAttachedFileContext> attachedFiles) {
+        if (hasText(rawUserMessage)) { // 用户有真实文本输入时，模型 currentMessage 使用原文。
+            return rawUserMessage; // 保持普通文字聊天行为不变。
+        }
+        if (attachedFiles != null && !attachedFiles.isEmpty()) { // 用户只发送附件时，给模型内部隐藏上下文。
+            return FILE_ONLY_MODEL_MESSAGE; // 不写入 chat_message，也不返回前端。
+        }
+        return ""; // 理论上入口校验已拦截空文本空附件，这里兜底。
+    }
+
+    private List<UserFile> resolveAttachedUserFiles(ChatRequestDTO dto, Long userId) {
+        List<Long> fileIds = dto == null ? null : dto.getFileIds(); // 读取本轮前端传入的文件 ID 列表。
+        if (fileIds == null || fileIds.isEmpty()) { // fileIds 可为空，不影响原普通聊天。
+            return Collections.emptyList(); // 返回空附件上下文。
+        }
+        if (userId == null) { // 附件校验必须绑定当前登录用户。
+            throw new IllegalArgumentException("未登录或登录状态失效"); // 不允许匿名用户携带 fileId。
+        }
+
+        Set<Long> distinctFileIds = new LinkedHashSet<>(); // 保持前端选择顺序，同时避免重复文件重复注入上下文。
+        for (Long fileId : fileIds) { // 遍历每个 fileId 做基础合法性检查。
+            if (fileId == null) { // 空 ID 无法校验归属。
+                throw new IllegalArgumentException("文件不存在或无权访问"); // 使用统一提示避免暴露细节。
+            }
+            distinctFileIds.add(fileId); // 记录非空文件 ID。
+        }
+
+        List<UserFile> attachedUserFiles = new ArrayList<>(); // 保存已校验归属的 UserFile，后续写入 chat_message_file。
+        for (Long fileId : distinctFileIds) { // 对去重后的文件 ID 逐个校验权限。
+            UserFile userFile = userFileService.getByIdAndUserId(fileId, userId); // 强制 id + user_id + status=1 查询。
+            if (userFile == null) { // 文件不存在、已失效或不属于当前用户。
+                throw new IllegalArgumentException("文件不存在或无权访问"); // 拒绝跨用户 fileId。
+            }
+            attachedUserFiles.add(userFile); // 保留已校验文件实体，仅在后端内部用于元信息入库和上下文转换。
+        }
+        log.info("[ChatMessage] attached files verified, userId: {}, count: {}", userId, attachedUserFiles.size()); // 只打印数量，不打印路径。
+        return attachedUserFiles; // 返回已校验归属的文件列表。
+    }
+
+    private List<ChatAttachedFileContext> toAttachedFileContexts(List<UserFile> userFiles) {
+        if (userFiles == null || userFiles.isEmpty()) { // 没有附件文件时返回空上下文。
+            return Collections.emptyList(); // 保持普通聊天不带 attachedFiles。
+        }
+        List<ChatAttachedFileContext> attachedFiles = new ArrayList<>(); // 构造 Tool Calling 安全附件元信息列表。
+        for (UserFile userFile : userFiles) { // 遍历已校验文件。
+            if (userFile == null) { // 兜底过滤空对象。
+                continue; // 跳过空文件。
+            }
+            attachedFiles.add(toAttachedFileContext(userFile)); // 只转换安全元信息，不包含 storagePath。
+        }
+        return attachedFiles; // 返回 ToolCallingRequestContext 使用的附件上下文。
+    }
+
+    private ChatAttachedFileContext toAttachedFileContext(UserFile userFile) {
+        ChatAttachedFileContext context = new ChatAttachedFileContext(); // 创建 Tool Calling 附件上下文对象。
+        context.setFileId(userFile.getId()); // 写入文件 ID。
+        context.setOriginalName(userFile.getOriginalName()); // 写入原始文件名。
+        context.setFileExt(userFile.getFileExt()); // 写入扩展名。
+        context.setFileType(userFile.getFileType()); // 写入业务文件类型。
+        context.setMimeType(userFile.getMimeType()); // 写入 MIME 类型。
+        context.setFileSize(userFile.getFileSize()); // 写入文件大小。
+        return context; // 不写入 storedName、storagePath 或文件内容。
+    }
+
+    private Conversation resolveConversation(ChatRequestDTO dto, Long userId, LocalDateTime now, String rawUserMessage) {
         if (dto.getConversationId() == null) {
             Conversation conversation = new Conversation(); // 未传会话 ID 时自动创建新会话。
             conversation.setUserId(userId);
-            conversation.setTitle(buildTitle(dto.getMsg()));
+            conversation.setTitle(buildTitle(rawUserMessage));
             conversation.setCreateTime(now);
             conversation.setUpdateTime(now);
             conversationMapper.insert(conversation);
@@ -197,7 +298,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         return conversation;
     }
 
-    private void saveMessage(Long conversationId, Long userId, String role, String content, LocalDateTime createTime) {
+    private Long saveMessage(Long conversationId, Long userId, String role, String content, LocalDateTime createTime) {
         ChatMessage message = new ChatMessage(); // 用户消息先保存，assistant 消息在流式完成后保存，保证历史可追溯。
         message.setConversationId(conversationId);
         message.setUserId(userId);
@@ -205,6 +306,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         message.setContent(content);
         message.setCreateTime(createTime);
         chatMessageMapper.insert(message);
+        return message.getId(); // MyBatis-Plus 使用数据库自增 ID 回填 messageId。
     }
 
     private List<ChatMessage> loadRecentHistoryMessages(Long conversationId, Long userId) {
@@ -213,15 +315,12 @@ public class ChatMessageServiceImpl implements ChatMessageService {
                     .eq(ChatMessage::getConversationId, conversationId)
                     .eq(ChatMessage::getUserId, userId)
                     .in(ChatMessage::getRole, ROLE_USER, ROLE_ASSISTANT)
-                    .isNotNull(ChatMessage::getContent)
                     .orderByDesc(ChatMessage::getCreateTime)
                     .orderByDesc(ChatMessage::getId)
                     .last("LIMIT " + HISTORY_CONTEXT_LIMIT));
             List<ChatMessage> historyMessages = new ArrayList<>(recentMessages); // 拷贝一份列表，后续过滤和反转不影响 MyBatis 返回对象。
             historyMessages.removeIf(message -> message == null
-                    || message.getContent() == null
-                    || message.getContent().trim().isEmpty()
-                    || !isHistoryRole(message.getRole())); // 只保留 user/assistant 且 content 非空的历史消息。
+                    || !isHistoryRole(message.getRole())); // 只保留 user/assistant，空用户消息可能仍有附件上下文。
             Collections.reverse(historyMessages); // 倒序查询后反转为时间正序，后续可直接按顺序传模型。
             return historyMessages;
         } catch (Exception e) {
@@ -234,26 +333,96 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         return ROLE_USER.equals(role) || ROLE_ASSISTANT.equals(role); // 历史上下文只允许普通用户消息和 assistant 回复。
     }
 
-    private List<ToolChatHistoryMessage> convertToToolHistoryMessages(List<ChatMessage> historyMessages) {
+    private List<ToolChatHistoryMessage> convertToToolHistoryMessages(List<ChatMessage> historyMessages, Long userId) {
         if (historyMessages == null || historyMessages.isEmpty()) {
             return Collections.emptyList(); // 没有历史时直接返回空列表，不影响当前主流程。
         }
 
+        Map<Long, List<ChatMessageFile>> messageFileMap = loadHistoryMessageFiles(historyMessages, userId); // 查询历史用户消息对应的附件元信息。
         List<ToolChatHistoryMessage> toolHistoryMessages = new ArrayList<>(); // 创建新列表，避免修改原始ChatMessage历史集合。
         for (ChatMessage historyMessage : historyMessages) {
-            if (historyMessage == null
-                    || !isHistoryRole(historyMessage.getRole())
-                    || historyMessage.getContent() == null
-                    || historyMessage.getContent().trim().isEmpty()) {
-                continue; // 转换阶段再次兜底过滤非法role和空content。
+            if (historyMessage == null || !isHistoryRole(historyMessage.getRole())) {
+                continue; // 转换阶段再次兜底过滤非法role。
+            }
+            List<ChatMessageFile> files = messageFileMap.get(historyMessage.getId()); // 当前历史消息关联的附件元信息。
+            boolean contentHasText = hasText(historyMessage.getContent()); // 判断数据库原始 content 是否有真实文本。
+            boolean hasFiles = files != null && !files.isEmpty(); // 判断当前消息是否有关联附件。
+            if (ROLE_ASSISTANT.equals(historyMessage.getRole()) && !contentHasText) { // assistant 空消息没有上下文价值。
+                continue; // 跳过空 assistant 消息。
+            }
+            if (ROLE_USER.equals(historyMessage.getRole()) && !contentHasText && !hasFiles) { // 用户空消息且无附件。
+                continue; // 跳过无意义历史。
+            }
+            String content = contentHasText ? historyMessage.getContent() : ""; // 默认使用数据库原始 content，空附件消息不伪造前端展示文本。
+            if (ROLE_USER.equals(historyMessage.getRole())) { // 只有用户消息才拼接该条消息的附件元信息。
+                content = appendHistoryFileContext(content, files); // 只拼到模型上下文，不修改 chat_message。
             }
             toolHistoryMessages.add(ToolChatHistoryMessage.builder()
                     .role(historyMessage.getRole())
-                    .content(historyMessage.getContent())
+                    .content(content)
                     .createTime(historyMessage.getCreateTime())
                     .build()); // 按原顺序转换为Tool Calling公共历史消息模型。
         }
         return toolHistoryMessages;
+    }
+
+    private Map<Long, List<ChatMessageFile>> loadHistoryMessageFiles(List<ChatMessage> historyMessages, Long userId) {
+        if (historyMessages == null || historyMessages.isEmpty()) { // 没有历史消息时不查询附件关联。
+            return Collections.emptyMap(); // 返回空映射。
+        }
+        List<Long> messageIds = new ArrayList<>(); // 收集用户历史消息 ID。
+        for (ChatMessage historyMessage : historyMessages) { // 遍历已加载的历史消息。
+            if (historyMessage != null
+                    && ROLE_USER.equals(historyMessage.getRole())
+                    && historyMessage.getId() != null) { // 只查询用户消息附件。
+                messageIds.add(historyMessage.getId()); // 保存消息 ID。
+            }
+        }
+        if (messageIds.isEmpty()) { // 没有用户消息 ID 时不查关联表。
+            return Collections.emptyMap(); // 返回空映射。
+        }
+
+        List<ChatMessageFile> messageFiles = chatMessageFileService.listByMessageIds(userId, messageIds); // 按 userId + messageIds 查询附件元信息。
+        if (messageFiles.isEmpty()) { // 没有历史附件关联。
+            return Collections.emptyMap(); // 返回空映射。
+        }
+        Map<Long, List<ChatMessageFile>> messageFileMap = new HashMap<>(); // 按 messageId 分组附件。
+        for (ChatMessageFile messageFile : messageFiles) { // 遍历附件关联。
+            if (messageFile == null || messageFile.getMessageId() == null) { // 过滤异常记录。
+                continue; // 跳过无效附件关联。
+            }
+            messageFileMap.computeIfAbsent(messageFile.getMessageId(), key -> new ArrayList<>()).add(messageFile); // 追加到对应消息。
+        }
+        return messageFileMap; // 返回消息 ID 到附件列表的映射。
+    }
+
+    private String appendHistoryFileContext(String content, List<ChatMessageFile> files) {
+        if (files == null || files.isEmpty()) { // 当前历史消息没有附件。
+            return content; // 保持原始消息内容。
+        }
+        StringBuilder builder = new StringBuilder(); // 只构造发给模型的上下文，不修改数据库 content。
+        if (hasText(content)) { // 历史消息有真实用户文本时保留原文。
+            builder.append(content); // 使用数据库原始 content。
+            builder.append("\n\n[本条消息附件]\n"); // 附件上下文标题。
+        } else { // 历史消息是只发附件的空文本消息。
+            builder.append("用户曾发送文件附件：\n"); // 只给模型看的历史附件上下文，不返回前端。
+        }
+        for (ChatMessageFile file : files) { // 遍历本条消息附件。
+            if (file == null) { // 兜底过滤空附件。
+                continue; // 跳过。
+            }
+            builder.append("* fileId=")
+                    .append(file.getFileId())
+                    .append(", 文件名=")
+                    .append(safeText(file.getOriginalName()))
+                    .append(", 类型=")
+                    .append(safeText(file.getFileExt()))
+                    .append(", 大小=")
+                    .append(formatFileSize(file.getFileSize()))
+                    .append("\n"); // 只拼接安全元信息。
+        }
+        builder.append("提示：以上只是附件元信息，不包含文件正文；如需读取文件内容，请调用 readFile 工具，未读取前不能编造文件内容。"); // 防止模型冒充已读文件。
+        return builder.toString(); // 返回增强后的模型上下文。
     }
 
     private void logHistoryMessages(List<ChatMessage> historyMessages) {
@@ -291,6 +460,56 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         log.debug("[ChatContext] memory summary loaded: {}", loaded); // 长期记忆状态降级为DEBUG。
         log.debug("[ChatContext] memory summary length: {}", normalizedSummary.length()); // 长期记忆长度降级为DEBUG。
         log.debug("[ChatContext] memory summary preview: {}", previewContent(normalizedSummary)); // memory preview不能在INFO打印。
+    }
+
+    private String buildMemoryUserMessage(String rawUserMessage, List<ChatAttachedFileContext> attachedFiles) {
+        if (attachedFiles == null || attachedFiles.isEmpty()) { // 本轮没有附件时不改变长期记忆输入。
+            return rawUserMessage; // 只记录原始用户消息。
+        }
+        StringBuilder builder = new StringBuilder(); // 构造长期记忆安全输入，不写隐藏模型提示。
+        if (hasText(rawUserMessage)) { // 用户有真实文本时保留原始表达。
+            builder.append(rawUserMessage); // 写入用户真实消息。
+            builder.append("\n\n[附件："); // 长期记忆只记录简短附件元信息。
+        } else { // 用户只发送文件时，不把隐藏提示当作用户真实表达。
+            builder.append("用户本轮上传或关联了附件：["); // 只记录文件元信息摘要。
+        }
+        for (int i = 0; i < attachedFiles.size(); i++) { // 遍历本轮附件。
+            ChatAttachedFileContext file = attachedFiles.get(i); // 当前附件元信息。
+            if (i > 0) { // 多个附件之间用逗号分隔。
+                builder.append(", "); // 分隔符。
+            }
+            builder.append(safeText(file == null ? null : file.getOriginalName()))
+                    .append("(")
+                    .append(safeText(file == null ? null : file.getFileExt()))
+                    .append(")"); // 只写文件名和扩展名，不写内容。
+        }
+        builder.append("]"); // 结束附件摘要。
+        return builder.toString(); // 返回给 conversation_memory 更新链路的安全文本。
+    }
+
+    private String safeText(String value) {
+        if (value == null || value.trim().isEmpty()) { // 元信息为空时使用占位。
+            return "-"; // 避免上下文里出现 null。
+        }
+        String normalizedValue = value.replace('\n', ' ').replace('\r', ' ').trim(); // 去掉换行，避免文件名污染上下文结构。
+        return normalizedValue.length() <= 120 ? normalizedValue : normalizedValue.substring(0, 120) + "..."; // 限制单个元信息字段长度。
+    }
+
+    private String formatFileSize(Long fileSize) {
+        if (fileSize == null || fileSize < 0) { // 文件大小缺失或异常时兜底。
+            return "未知"; // 返回友好占位。
+        }
+        if (fileSize < 1024) { // 小于 1KB 时按字节展示。
+            return fileSize + "B"; // 返回字节。
+        }
+        if (fileSize < 1024 * 1024) { // 小于 1MB 时按 KB 展示。
+            return (fileSize / 1024) + "KB"; // 返回 KB。
+        }
+        return (fileSize / (1024 * 1024)) + "MB"; // 大于等于 1MB 时按 MB 展示。
+    }
+
+    private boolean hasText(String value) {
+        return value != null && !value.trim().isEmpty(); // 判断字符串是否包含有效内容。
     }
 
     private String previewContent(String content) {

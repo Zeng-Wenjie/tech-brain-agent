@@ -1,10 +1,14 @@
 package com.agent.service.impl;
 
 import com.agent.entity.ChatMessage;
+import com.agent.entity.ChatMessageFile;
 import com.agent.entity.Conversation;
 import com.agent.entity.Result;
+import com.agent.entity.vo.ChatMessageFileVO;
+import com.agent.entity.vo.ChatMessageVO;
 import com.agent.mapper.ChatMessageMapper;
 import com.agent.mapper.ConversationMapper;
+import com.agent.service.ChatMessageFileService;
 import com.agent.service.ConversationMemoryService;
 import com.agent.service.ConversationService;
 import com.agent.utils.UserContext;
@@ -17,7 +21,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 @Service
 @Slf4j
@@ -31,6 +39,9 @@ public class ConversationServiceImpl implements ConversationService {
 
     @Autowired
     private ConversationMemoryService conversationMemoryService; // 删除会话时同步清理 conversation_memory 长期记忆。
+
+    @Autowired
+    private ChatMessageFileService chatMessageFileService; // 查询消息附件关联，给会话历史返回 attachments。
 
     @Override
     public Result<Long> createConversation() {
@@ -61,7 +72,7 @@ public class ConversationServiceImpl implements ConversationService {
     }
 
     @Override
-    public Result<List<ChatMessage>> listMessages(Long conversationId) {
+    public Result<List<ChatMessageVO>> listMessages(Long conversationId) {
         Long userId = UserContext.getUserId();
         if (conversationId == null) {
             return Result.error(HttpServletResponse.SC_BAD_REQUEST, "会话ID不能为空");
@@ -79,7 +90,79 @@ public class ConversationServiceImpl implements ConversationService {
                 .orderByAsc(ChatMessage::getCreateTime)
                 .orderByAsc(ChatMessage::getId));
 
-        return Result.success(messages);
+        return Result.success(toMessageVOList(messages, userId));
+    }
+
+    /**
+     * 将聊天消息实体转换为前端历史消息 VO，并批量填充附件元信息。
+     *
+     * <p>调用链：listMessages 查询 chat_message -> listByMessageIds 查询 chat_message_file
+     * -> 按 messageId 分组 -> ChatMessageVO.attachments 返回前端。</p>
+     */
+    private List<ChatMessageVO> toMessageVOList(List<ChatMessage> messages, Long userId) {
+        if (messages == null || messages.isEmpty()) { // 没有消息时直接返回空数组。
+            return Collections.emptyList(); // 避免前端收到 null。
+        }
+
+        List<Long> messageIds = messages.stream()
+                .filter(message -> message != null && message.getId() != null) // 只收集有效消息 ID。
+                .map(ChatMessage::getId) // 提取 chat_message.id。
+                .collect(Collectors.toList()); // 批量查询附件，避免逐条查库。
+        List<ChatMessageFile> messageFiles = chatMessageFileService.listByMessageIds(userId, messageIds); // 按当前用户过滤附件。
+        Map<Long, List<ChatMessageFile>> fileMap = messageFiles.stream()
+                .filter(file -> file != null && file.getMessageId() != null) // 过滤异常附件记录。
+                .collect(Collectors.groupingBy(ChatMessageFile::getMessageId)); // 按消息 ID 分组。
+
+        List<ChatMessageVO> result = new ArrayList<>(); // 组装最终返回给前端的消息列表。
+        for (ChatMessage message : messages) { // 保持原消息排序。
+            if (message == null) { // 防御空元素。
+                continue; // 跳过异常消息。
+            }
+            ChatMessageVO vo = toMessageVO(message); // 复制原有消息字段。
+            vo.setAttachments(toFileVOList(fileMap.get(message.getId()))); // 设置附件元信息，无附件时为空数组。
+            result.add(vo); // 加入返回列表。
+        }
+        return result; // 返回包含 attachments 的消息列表。
+    }
+
+    /**
+     * 转换单条聊天消息，不修改 content，也不附加文件正文。
+     */
+    private ChatMessageVO toMessageVO(ChatMessage message) {
+        ChatMessageVO vo = new ChatMessageVO(); // 创建消息返回对象。
+        vo.setId(message.getId()); // 复制消息 ID。
+        vo.setConversationId(message.getConversationId()); // 复制会话 ID。
+        vo.setUserId(message.getUserId()); // 复制用户 ID。
+        vo.setRole(message.getRole()); // 复制消息角色。
+        vo.setContent(message.getContent()); // 复制原始消息内容，不拼接附件。
+        vo.setCreateTime(message.getCreateTime()); // 复制消息创建时间。
+        return vo; // 返回消息 VO。
+    }
+
+    /**
+     * 转换消息附件元信息，不返回服务器真实路径和存储文件名。
+     */
+    private List<ChatMessageFileVO> toFileVOList(List<ChatMessageFile> files) {
+        if (files == null || files.isEmpty()) { // 当前消息没有附件。
+            return Collections.emptyList(); // 让 JSON 返回 []。
+        }
+        List<ChatMessageFileVO> result = new ArrayList<>(); // 组装附件 VO 列表。
+        for (ChatMessageFile file : files) { // 遍历附件关联快照。
+            if (file == null) { // 防御空元素。
+                continue; // 跳过异常记录。
+            }
+            ChatMessageFileVO vo = new ChatMessageFileVO(); // 创建附件安全返回对象。
+            vo.setFileId(file.getFileId()); // 返回 user_file.id。
+            vo.setMessageId(file.getMessageId()); // 返回所属消息 ID。
+            vo.setOriginalName(file.getOriginalName()); // 返回原始文件名。
+            vo.setFileExt(file.getFileExt()); // 返回扩展名。
+            vo.setFileType(file.getFileType()); // 返回文件业务类型。
+            vo.setMimeType(file.getMimeType()); // 返回 MIME 类型。
+            vo.setFileSize(file.getFileSize()); // 返回文件大小。
+            vo.setCreateTime(file.getCreateTime()); // 返回附件关联创建时间。
+            result.add(vo); // 加入附件列表。
+        }
+        return result; // 返回附件元信息列表。
     }
 
     @Override

@@ -1,8 +1,8 @@
 package com.agent.controller;
 
-import com.agent.entity.ChatMessage;
 import com.agent.entity.Conversation;
 import com.agent.entity.Result;
+import com.agent.entity.vo.ChatMessageVO;
 import com.agent.service.ConversationService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -38,7 +38,7 @@ public class ConversationController {
 
     @Operation(summary = "查询指定会话消息")
     @GetMapping("/{id}/messages")
-    public Result<List<ChatMessage>> listMessages(@PathVariable("id") Long conversationId) {
+    public Result<List<ChatMessageVO>> listMessages(@PathVariable("id") Long conversationId) {
         return conversationService.listMessages(conversationId);
     }
 

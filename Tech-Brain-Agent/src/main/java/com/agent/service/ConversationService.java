@@ -1,8 +1,8 @@
 package com.agent.service;
 
-import com.agent.entity.ChatMessage;
 import com.agent.entity.Conversation;
 import com.agent.entity.Result;
+import com.agent.entity.vo.ChatMessageVO;
 
 import java.util.List;
 /*
@@ -15,7 +15,7 @@ public interface ConversationService {
 
     Result<List<Conversation>> listConversations();
 
-    Result<List<ChatMessage>> listMessages(Long conversationId);
+    Result<List<ChatMessageVO>> listMessages(Long conversationId);
 
     Result<String> deleteConversation(Long conversationId);
 }
