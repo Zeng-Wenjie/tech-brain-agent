@@ -15,6 +15,8 @@ import com.agent.service.ConversationMemoryService;
 import com.agent.service.ToolCallLogService;
 import com.agent.service.UserFileService;
 import com.agent.toolcalling.context.ChatAttachedFileContext;
+import com.agent.toolcalling.context.ConversationFocusContext;
+import com.agent.toolcalling.context.ConversationFocusService;
 import com.agent.toolcalling.core.ToolChatHistoryMessage;
 import com.agent.toolcalling.core.ToolCallingChatService;
 import com.agent.toolcalling.core.ToolCallingStreamCallback;
@@ -61,6 +63,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     private static final String SUMMARY_RESULT_EVENT_NAME = "summary_result"; // summarizeArticle工具完整总结结果使用该SSE事件名发送。
     private static final int TITLE_MAX_LENGTH = 20;
     private static final int HISTORY_CONTEXT_LIMIT = 100; // 4.3 阶段读取并转换最近 6 条结构化历史，供Tool Calling最终回答阶段使用。
+    private static final int RECENT_ATTACHED_FILE_LIMIT = 10; // 会话文件焦点最多加载最近10个附件元信息。
     private static final long SSE_TIMEOUT = 120000L; // SSE 连接最长等待时间，给 DeepSeek 流式生成保留足够窗口。
     private static final String FILE_ONLY_MODEL_MESSAGE = "用户本轮上传了文件但没有输入文字。请根据附件元信息回应；如果需要读取文件内容，请调用 readFile 工具，未读取前不能编造文件内容。"; // 只发文件时给模型的内部隐藏上下文，不写入 chat_message。
 
@@ -84,6 +87,9 @@ public class ChatMessageServiceImpl implements ChatMessageService {
 
     @Autowired
     private UserFileService userFileService; // 校验 /chat/message 本轮 fileIds 是否属于当前用户。
+
+    @Autowired
+    private ConversationFocusService conversationFocusService; // 读取 readFile 成功后的当前会话文件焦点。
 
     @Override
     public SseEmitter sendMessage(ChatRequestDTO dto) {
@@ -129,6 +135,8 @@ public class ChatMessageServiceImpl implements ChatMessageService {
 
         Long userMessageId = saveMessage(conversation.getId(), userId, ROLE_USER, persistedUserMessage, now); // 用户消息只保存真实输入，拿到 messageId 后才能保存附件关联。
         chatMessageFileService.saveMessageFiles(userMessageId, conversation.getId(), userId, attachedUserFiles); // 写入 chat_message_file，仅保存附件元信息。
+        List<ChatAttachedFileContext> recentAttachedFiles = loadRecentAttachedFiles(conversation.getId(), userId); // 加载当前会话最近附件，供“这个文件/继续分析”指代解析。
+        ChatAttachedFileContext activeFileFocus = loadActiveFileFocus(conversation.getId(), userId); // 加载最近成功readFile的文件焦点，优先处理“这段代码/继续优化”等指代。
 
         log.debug("[ChatMessage] use ToolCallingChatService.chatStream: true"); // 调用细节降级为DEBUG。
         log.debug("[ChatMessage] tool-calling current message: {}", previewContent(modelCurrentMessage)); // 模型内部消息只在DEBUG打印短preview。
@@ -140,6 +148,8 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         requestContext.setConversationId(conversation.getId()); // 当前会话ID用于RAG命中后保存conversation级focus。
         requestContext.setCurrentMessage(modelCurrentMessage); // 当前模型内部消息；只发文件时使用隐藏上下文，不保存到 chat_message。
         requestContext.setAttachedFiles(attachedFiles); // 本轮附件只传安全元信息，不包含 storagePath 或文件内容。
+        requestContext.setRecentAttachedFiles(recentAttachedFiles); // 最近附件只传安全元信息，用于会话文件焦点记忆。
+        requestContext.setActiveFileFocus(activeFileFocus); // 最近成功读取文件焦点只传元信息，用于多附件场景的模糊指代解析。
         requestContext.setToolCallLogRecorder(buildToolCallLogRecorder()); // 注入日志回调，避免Tech-Brain-Tool模块直接依赖Agent服务。
         toolCallingChatService.chatStream(modelCurrentMessage, memorySummary, toolHistoryMessages, requestContext, new ToolCallingStreamCallback() { // 传入长期记忆、结构化历史和工具上下文，禁止恢复multiTurnQuestion。
             @Override
@@ -277,6 +287,72 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         context.setFileType(userFile.getFileType()); // 写入业务文件类型。
         context.setMimeType(userFile.getMimeType()); // 写入 MIME 类型。
         context.setFileSize(userFile.getFileSize()); // 写入文件大小。
+        return context; // 不写入 storedName、storagePath 或文件内容。
+    }
+
+    private List<ChatAttachedFileContext> loadRecentAttachedFiles(Long conversationId, Long userId) {
+        if (conversationId == null || userId == null) { // 缺少会话或用户时不能加载文件焦点。
+            return Collections.emptyList(); // 返回空列表，避免误查附件。
+        }
+        try {
+            List<ChatMessageFile> recentFiles = chatMessageFileService.listByConversationId(
+                    userId, conversationId, RECENT_ATTACHED_FILE_LIMIT); // 按当前用户和会话查询最近附件关联。
+            if (recentFiles == null || recentFiles.isEmpty()) { // 当前会话没有历史附件。
+                return Collections.emptyList(); // 返回空列表。
+            }
+            Set<Long> seenFileIds = new LinkedHashSet<>(); // 按 create_time desc 查询结果去重，保留最近一次出现的 fileId。
+            List<ChatAttachedFileContext> recentAttachedFiles = new ArrayList<>(); // 构造 Tool Calling 最近附件上下文。
+            for (ChatMessageFile file : recentFiles) { // 遍历最近附件关联。
+                if (file == null || file.getFileId() == null) { // 异常记录跳过。
+                    continue; // 不注入无效附件。
+                }
+                if (!seenFileIds.add(file.getFileId())) { // 同一个文件在会话里多次出现时只保留最近一次。
+                    continue; // 跳过重复 fileId。
+                }
+                recentAttachedFiles.add(toAttachedFileContext(file)); // 只转换安全元信息，不包含 storagePath。
+            }
+            log.debug("[ChatMessage] recent attached file count: {}", recentAttachedFiles.size()); // 只打印数量，不打印文件内容。
+            return recentAttachedFiles; // 返回最近附件焦点列表。
+        } catch (Exception e) {
+            log.warn("[ChatMessage] load recent attached files failed, conversationId: {}, userId: {}",
+                    conversationId, userId, e); // 历史附件加载失败不能影响聊天主流程。
+            return Collections.emptyList(); // 兜底为空，保持普通聊天可用。
+        }
+    }
+
+    private ChatAttachedFileContext loadActiveFileFocus(Long conversationId, Long userId) {
+        if (conversationId == null || userId == null) { // 缺少会话或用户时不能读取activeFileFocus。
+            return null; // 返回空焦点。
+        }
+        try {
+            ConversationFocusContext focus = conversationFocusService.getActiveFileFocus(userId, conversationId); // 按当前用户和会话读取最近成功readFile焦点。
+            if (focus == null || focus.getSourceId() == null) { // 没有文件焦点。
+                return null; // 返回空焦点。
+            }
+            ChatAttachedFileContext context = new ChatAttachedFileContext(); // 转换为Tool Calling附件上下文。
+            context.setFileId(focus.getSourceId()); // sourceId 对应 user_file.id。
+            context.setOriginalName(focus.getTitle()); // title 保存原始文件名。
+            context.setFileExt(focus.getFileExt()); // 写入扩展名。
+            context.setFileType(focus.getFileType()); // 写入业务文件类型。
+            context.setMimeType(focus.getMimeType()); // 写入 MIME 类型。
+            context.setFileSize(focus.getFileSize()); // 写入文件大小。
+            log.debug("[ChatMessage] active file focus loaded, fileId: {}", context.getFileId()); // 只打印ID，不打印路径或内容。
+            return context; // 返回activeFileFocus元信息。
+        } catch (Exception e) {
+            log.warn("[ChatMessage] load active file focus failed, conversationId: {}, userId: {}",
+                    conversationId, userId, e); // 读取失败不能影响聊天主流程。
+            return null; // 兜底为空。
+        }
+    }
+
+    private ChatAttachedFileContext toAttachedFileContext(ChatMessageFile file) {
+        ChatAttachedFileContext context = new ChatAttachedFileContext(); // 创建 Tool Calling 附件上下文对象。
+        context.setFileId(file.getFileId()); // 写入 user_file.id。
+        context.setOriginalName(file.getOriginalName()); // 写入附件原始文件名快照。
+        context.setFileExt(file.getFileExt()); // 写入扩展名快照。
+        context.setFileType(file.getFileType()); // 写入业务文件类型快照。
+        context.setMimeType(file.getMimeType()); // 写入 MIME 类型快照。
+        context.setFileSize(file.getFileSize()); // 写入文件大小快照。
         return context; // 不写入 storedName、storagePath 或文件内容。
     }
 
@@ -603,11 +679,21 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     private void sendError(SseEmitter emitter, Throwable error) {
         try { // error 事件尽量发给前端，便于 UI 结束加载态并展示失败原因。
             Map<String, String> errorData = new HashMap<>(); // error 也使用 JSON 对象，保持前端解析一致。
-            errorData.put("message", error.getMessage());
+            errorData.put("message", resolveClientErrorMessage(error)); // DeepSeek等内部异常转成友好文案，不把原始HTTP错误暴露给前端。
             emitter.send(SseEmitter.event().name("error").data(errorData));
         } catch (IOException ignored) {
             // 连接断开时忽略二次发送失败。
         }
         emitter.completeWithError(error);
+    }
+
+    private String resolveClientErrorMessage(Throwable error) {
+        String message = error == null ? null : error.getMessage(); // 读取原始异常信息。
+        if (message != null && (message.contains("DeepSeek调用失败")
+                || message.contains("DeepSeek流式调用失败")
+                || message.contains("HTTP 400"))) { // 模型调用异常对前端统一兜底。
+            return "模型调用失败，请稍后重试。"; // 友好错误，不暴露内部HTTP细节。
+        }
+        return message == null || message.trim().isEmpty() ? "请求处理失败，请稍后重试。" : message; // 其它业务异常保持原友好提示。
     }
 }

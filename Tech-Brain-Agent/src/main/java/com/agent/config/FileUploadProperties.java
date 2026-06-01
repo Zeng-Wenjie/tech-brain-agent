@@ -37,11 +37,17 @@ public class FileUploadProperties { // 用户文件本地上传配置对象。
             "webp",
             "py",
             "java",
+            "vue",
+            "sql",
             "js",
+            "ts",
             "json",
             "xml",
             "html",
-            "css"
+            "css",
+            "yml",
+            "yaml",
+            "properties"
     ));
 
     private List<String> allowedMimeTypes = new ArrayList<>(List.of( // 允许上传的 MIME 类型。
@@ -55,12 +61,22 @@ public class FileUploadProperties { // 用户文件本地上传配置对象。
             "image/webp",
             "text/x-python",
             "text/x-java-source",
+            "text/x-vue",
+            "text/x-sql",
             "application/javascript",
             "text/javascript",
+            "application/x-javascript",
+            "text/typescript",
+            "application/typescript",
             "application/json",
             "application/xml",
             "text/xml",
             "text/html",
-            "text/css"
+            "text/css",
+            "application/x-yaml",
+            "text/yaml",
+            "text/x-yaml",
+            "text/x-java-properties",
+            "application/octet-stream"
     ));
 }

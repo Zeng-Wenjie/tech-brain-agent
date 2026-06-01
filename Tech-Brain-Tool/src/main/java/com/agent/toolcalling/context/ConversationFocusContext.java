@@ -21,6 +21,14 @@ public class ConversationFocusContext { // 会话最近命中文档焦点DTO。
 
     private String query; // 触发命中的用户检索问题。
 
+    private String fileExt; // 文件焦点扩展名，仅用于 FILE 类型 activeFileFocus。
+
+    private String fileType; // 文件焦点业务类型，仅用于 FILE 类型 activeFileFocus。
+
+    private String mimeType; // 文件焦点 MIME 类型，仅用于 FILE 类型 activeFileFocus。
+
+    private Long fileSize; // 文件焦点大小，仅用于 FILE 类型 activeFileFocus。
+
     private LocalDateTime updateTime; // 焦点更新时间。
 
     public String getSourceType() { // 获取来源类型。
@@ -61,6 +69,38 @@ public class ConversationFocusContext { // 会话最近命中文档焦点DTO。
 
     public void setQuery(String query) { // 设置触发查询。
         this.query = query; // 写入query。
+    }
+
+    public String getFileExt() { // 获取文件焦点扩展名。
+        return fileExt; // 返回扩展名。
+    }
+
+    public void setFileExt(String fileExt) { // 设置文件焦点扩展名。
+        this.fileExt = fileExt; // 保存扩展名。
+    }
+
+    public String getFileType() { // 获取文件焦点业务类型。
+        return fileType; // 返回业务类型。
+    }
+
+    public void setFileType(String fileType) { // 设置文件焦点业务类型。
+        this.fileType = fileType; // 保存业务类型。
+    }
+
+    public String getMimeType() { // 获取文件焦点 MIME 类型。
+        return mimeType; // 返回 MIME 类型。
+    }
+
+    public void setMimeType(String mimeType) { // 设置文件焦点 MIME 类型。
+        this.mimeType = mimeType; // 保存 MIME 类型。
+    }
+
+    public Long getFileSize() { // 获取文件焦点大小。
+        return fileSize; // 返回文件大小。
+    }
+
+    public void setFileSize(Long fileSize) { // 设置文件焦点大小。
+        this.fileSize = fileSize; // 保存文件大小。
     }
 
     public LocalDateTime getUpdateTime() { // 获取更新时间。
