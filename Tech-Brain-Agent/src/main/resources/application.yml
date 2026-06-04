@@ -127,7 +127,7 @@ techbrain:
   project:
     workspace-dir: D:/JavaAgent/Tech-Brain
     max-file-size-kb: 512
-    max-read-chars: 20000
+    max-read-chars: 50000
     allowed-extensions:
       - java
       - kt

@@ -28,7 +28,7 @@ import java.util.List;
 public class ProjectWorkspaceProperties { // 项目代码工作区安全配置对象。
     private String workspaceDir = "./workspace/projects"; // 项目代码工作区根目录，外部路径必须限制在该目录下。
     private Integer maxFileSizeKb = 512; // 单个项目文件最大允许读取大小，单位 KB。
-    private Integer maxReadChars = 20000; // 后续读取项目代码时的最大字符数上限。
+    private Integer maxReadChars = 50000; // 后续读取项目代码时的默认最大字符数上限。
     private List<String> allowedExtensions = new ArrayList<>(List.of( // 允许作为项目代码读取的多语言文本扩展名白名单。
             "java", "kt", "kts", "groovy", "scala",
             "py", "ipynb",
