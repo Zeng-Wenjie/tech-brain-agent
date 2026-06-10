@@ -136,7 +136,8 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         Long userMessageId = saveMessage(conversation.getId(), userId, ROLE_USER, persistedUserMessage, now); // 用户消息只保存真实输入，拿到 messageId 后才能保存附件关联。
         chatMessageFileService.saveMessageFiles(userMessageId, conversation.getId(), userId, attachedUserFiles); // 写入 chat_message_file，仅保存附件元信息。
         List<ChatAttachedFileContext> recentAttachedFiles = loadRecentAttachedFiles(conversation.getId(), userId); // 加载当前会话最近附件，供“这个文件/继续分析”指代解析。
-        ChatAttachedFileContext activeFileFocus = loadActiveFileFocus(conversation.getId(), userId); // 加载最近成功readFile的文件焦点，优先处理“这段代码/继续优化”等指代。
+        ChatAttachedFileContext activeFileFocus = loadActiveFileFocus(conversation.getId(), userId); // 加载最近成功readFile的上传文件焦点，优先处理上传附件指代。
+        ConversationFocusContext projectFileFocus = loadProjectFileFocus(conversation.getId(), userId); // 加载最近成功readProjectFile的项目源码文件焦点，处理“给我代码/继续分析”等指代。
 
         log.debug("[ChatMessage] use ToolCallingChatService.chatStream: true"); // 调用细节降级为DEBUG。
         log.debug("[ChatMessage] tool-calling current message: {}", previewContent(modelCurrentMessage)); // 模型内部消息只在DEBUG打印短preview。
@@ -150,6 +151,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         requestContext.setAttachedFiles(attachedFiles); // 本轮附件只传安全元信息，不包含 storagePath 或文件内容。
         requestContext.setRecentAttachedFiles(recentAttachedFiles); // 最近附件只传安全元信息，用于会话文件焦点记忆。
         requestContext.setActiveFileFocus(activeFileFocus); // 最近成功读取文件焦点只传元信息，用于多附件场景的模糊指代解析。
+        requestContext.setProjectFileFocus(projectFileFocus); // 最近成功读取项目源码文件焦点只传相对路径和元信息，不包含文件内容或服务器绝对路径。
         requestContext.setToolCallLogRecorder(buildToolCallLogRecorder()); // 注入日志回调，避免Tech-Brain-Tool模块直接依赖Agent服务。
         toolCallingChatService.chatStream(modelCurrentMessage, memorySummary, toolHistoryMessages, requestContext, new ToolCallingStreamCallback() { // 传入长期记忆、结构化历史和工具上下文，禁止恢复multiTurnQuestion。
             @Override
@@ -340,6 +342,24 @@ public class ChatMessageServiceImpl implements ChatMessageService {
             return context; // 返回activeFileFocus元信息。
         } catch (Exception e) {
             log.warn("[ChatMessage] load active file focus failed, conversationId: {}, userId: {}",
+                    conversationId, userId, e); // 读取失败不能影响聊天主流程。
+            return null; // 兜底为空。
+        }
+    }
+
+    private ConversationFocusContext loadProjectFileFocus(Long conversationId, Long userId) {
+        if (conversationId == null || userId == null) { // 缺少会话或用户时不能读取 projectFileFocus。
+            return null; // 返回空焦点。
+        }
+        try {
+            ConversationFocusContext focus = conversationFocusService.getProjectFileFocus(userId, conversationId); // 按当前用户和会话读取最近成功 readProjectFile 的项目源码焦点。
+            if (focus == null || focus.getPath() == null || focus.getPath().isBlank()) { // 没有项目文件焦点。
+                return null; // 返回空焦点。
+            }
+            log.debug("[ChatMessage] project file focus loaded, path: {}", focus.getPath()); // 只打印 workspace 相对路径，不打印绝对路径或文件内容。
+            return focus; // 返回 projectFileFocus 元信息。
+        } catch (Exception e) {
+            log.warn("[ChatMessage] load project file focus failed, conversationId: {}, userId: {}",
                     conversationId, userId, e); // 读取失败不能影响聊天主流程。
             return null; // 兜底为空。
         }

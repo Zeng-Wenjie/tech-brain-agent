@@ -5,9 +5,11 @@ import java.time.LocalDateTime; // 保存焦点更新时间。
 /**
  * 会话最近命中文档焦点上下文。
  *
- * <p>适用场景：RAG工具命中某篇文档后，把top1命中文档信息保存为conversation级焦点，后续“这篇笔记”等指代可读取该上下文。</p>
- * <p>当前调用链为：RagSearchTool命中Milvus top1 -> ConversationFocusService.saveLastHitArticle -> Redis保存本DTO对应的JSON结构。</p>
- * <p>本类位于Tech-Brain-Tool公共模块，只描述通用会话焦点数据，不依赖具体Tool、Milvus或数据库表。</p>
+ * <p>适用场景：保存当前会话的轻量焦点元信息，支持 RAG 文章焦点、用户上传文件 activeFileFocus 和项目源码 projectFileFocus。</p>
+ * <p>当前调用链包括：RagSearchTool 命中文档 -> ConversationFocusService.saveLastHitArticle -> Redis 保存 ARTICLE；
+ * ReadFileTool 成功读取用户上传文件 -> ConversationFocusService.saveActiveFileFocus -> Redis 保存 FILE；
+ * ReadProjectFileTool 成功读取项目源码文件 -> ConversationFocusService.saveProjectFileFocus -> Redis 保存 PROJECT_FILE。</p>
+ * <p>本类位于 Tech-Brain-Tool 公共模块，只描述通用会话焦点数据，不依赖具体 Tool、Milvus、数据库表或项目文件读取实现。</p>
  */
 public class ConversationFocusContext { // 会话最近命中文档焦点DTO。
 
@@ -28,6 +30,14 @@ public class ConversationFocusContext { // 会话最近命中文档焦点DTO。
     private String mimeType; // 文件焦点 MIME 类型，仅用于 FILE 类型 activeFileFocus。
 
     private Long fileSize; // 文件焦点大小，仅用于 FILE 类型 activeFileFocus。
+
+    private String path; // 项目文件焦点相对 workspace 路径，仅用于 PROJECT_FILE，不保存服务器绝对路径。
+
+    private String language; // 项目文件焦点语言展示名，仅用于 PROJECT_FILE。
+
+    private Boolean truncated; // 项目文件最近读取时是否发生截断，仅用于 PROJECT_FILE。
+
+    private String readMode; // 项目文件最近读取模式，SUMMARY 或 FULL，仅用于 PROJECT_FILE。
 
     private LocalDateTime updateTime; // 焦点更新时间。
 
@@ -101,6 +111,38 @@ public class ConversationFocusContext { // 会话最近命中文档焦点DTO。
 
     public void setFileSize(Long fileSize) { // 设置文件焦点大小。
         this.fileSize = fileSize; // 保存文件大小。
+    }
+
+    public String getPath() { // 获取项目文件相对 workspace 路径。
+        return path; // 返回相对路径，不包含服务器绝对路径。
+    }
+
+    public void setPath(String path) { // 设置项目文件相对 workspace 路径。
+        this.path = path; // 保存相对路径。
+    }
+
+    public String getLanguage() { // 获取项目文件语言展示名。
+        return language; // 返回语言展示名。
+    }
+
+    public void setLanguage(String language) { // 设置项目文件语言展示名。
+        this.language = language; // 保存语言展示名。
+    }
+
+    public Boolean getTruncated() { // 获取项目文件最近读取是否截断。
+        return truncated; // 返回截断状态。
+    }
+
+    public void setTruncated(Boolean truncated) { // 设置项目文件最近读取截断状态。
+        this.truncated = truncated; // 保存截断状态。
+    }
+
+    public String getReadMode() { // 获取项目文件最近读取模式。
+        return readMode; // 返回 SUMMARY 或 FULL。
+    }
+
+    public void setReadMode(String readMode) { // 设置项目文件最近读取模式。
+        this.readMode = readMode; // 保存读取模式。
     }
 
     public LocalDateTime getUpdateTime() { // 获取更新时间。
