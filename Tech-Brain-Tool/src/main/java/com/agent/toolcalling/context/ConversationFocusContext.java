@@ -34,6 +34,7 @@ public class ConversationFocusContext { // 会话最近命中文档焦点DTO。
     private String path; // 项目文件焦点相对 workspace 路径，仅用于 PROJECT_FILE，不保存服务器绝对路径。
 
     private String language; // 项目文件焦点语言展示名，仅用于 PROJECT_FILE。
+    private String markdownName; // 项目文件焦点 Markdown 代码块语言名，仅用于 PROJECT_FILE。
 
     private Boolean truncated; // 项目文件最近读取时是否发生截断，仅用于 PROJECT_FILE。
 
@@ -127,6 +128,14 @@ public class ConversationFocusContext { // 会话最近命中文档焦点DTO。
 
     public void setLanguage(String language) { // 设置项目文件语言展示名。
         this.language = language; // 保存语言展示名。
+    }
+
+    public String getMarkdownName() { // 获取项目文件 Markdown 语言名。
+        return markdownName; // 返回 Markdown code fence 语言名。
+    }
+
+    public void setMarkdownName(String markdownName) { // 设置项目文件 Markdown 语言名。
+        this.markdownName = markdownName; // 保存 Markdown code fence 语言名。
     }
 
     public Boolean getTruncated() { // 获取项目文件最近读取是否截断。

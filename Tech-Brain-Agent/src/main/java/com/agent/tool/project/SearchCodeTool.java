@@ -3,6 +3,8 @@ package com.agent.tool.project;
 import com.agent.config.ProjectWorkspaceProperties;
 import com.agent.security.ProjectPathGuard;
 import com.agent.toolcalling.support.AbstractAiTool;
+import com.agent.toolcalling.project.language.CodeLanguage;
+import com.agent.toolcalling.project.language.CodeLanguageRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -321,34 +323,32 @@ public class SearchCodeTool extends AbstractAiTool { // 项目代码搜索业务
                                     SearchOptions options) { // 判断单行是否匹配搜索条件。
         String searchType = options.searchType(); // 读取搜索类型。
         String query = cleanMethodQuery(options.query()); // 去掉方法名后的括号。
+        CodeLanguage codeLanguage = CodeLanguageRegistry.resolveByFileName(fileName); // 根据文件名统一识别语言规则。
         String normalizedLine = normalizeForMatch(line, options.caseSensitive()); // 标准化当前行。
         String normalizedQuery = normalizeForMatch(query, options.caseSensitive()); // 标准化 query。
         if (normalizedQuery.isBlank()) { // 空 query 不匹配。
             return MatchDecision.notMatched(); // 返回未命中。
         }
         if (SEARCH_TYPE_CLASS.equals(searchType)) { // 类名搜索。
-            return matchClassLine(fileName, line, normalizedLine, normalizedQuery, options); // 按类声明规则匹配。
+            return matchClassLine(fileName, line, query, normalizedLine, normalizedQuery, options, codeLanguage); // 按语言类声明规则匹配。
         }
         if (SEARCH_TYPE_METHOD.equals(searchType)) { // 方法名搜索。
-            return matchMethodLine(fileName, line, normalizedLine, normalizedQuery, options); // 按方法声明规则匹配。
+            return matchMethodLine(fileName, line, query, normalizedLine, normalizedQuery, options, codeLanguage); // 按语言方法声明规则匹配。
         }
         return matchKeywordLine(fileName, line, normalizedLine, normalizedQuery, options); // 默认关键词搜索。
     }
 
     private MatchDecision matchClassLine(String fileName,
                                          String line,
+                                         String query,
                                          String normalizedLine,
                                          String normalizedQuery,
-                                         SearchOptions options) { // 类名/接口名/枚举名匹配。
-        boolean declarationMatched = containsAny(normalizedLine,
-                "class " + normalizedQuery,
-                "interface " + normalizedQuery,
-                "enum " + normalizedQuery,
-                "record " + normalizedQuery,
-                "object " + normalizedQuery,
-                "function " + normalizedQuery,
-                "const " + normalizedQuery,
-                "type " + normalizedQuery); // 简单声明关键词匹配。
+                                         SearchOptions options,
+                                         CodeLanguage codeLanguage) { // 类名/接口名/枚举名匹配。
+        boolean declarationMatched = codeLanguage.matchesClassDeclaration(line, query, options.caseSensitive()); // 使用语言注册表中的类规则。
+        if (!declarationMatched && codeLanguage.isComponentFileNameClassFallback()) { // Vue/Svelte 组件允许文件名和script声明辅助命中。
+            declarationMatched = isComponentClassFallbackMatch(fileName, normalizedLine, normalizedQuery, options); // 组件文件名匹配 export default/defineComponent。
+        }
         if (declarationMatched) { // 命中声明。
             return new MatchDecision(true, SEARCH_TYPE_CLASS, 80 + scoreForFileName(fileName, options.query()), line.trim()); // 类声明高分。
         }
@@ -361,17 +361,15 @@ public class SearchCodeTool extends AbstractAiTool { // 项目代码搜索业务
 
     private MatchDecision matchMethodLine(String fileName,
                                           String line,
+                                          String query,
                                           String normalizedLine,
                                           String normalizedQuery,
-                                          SearchOptions options) { // 方法名/函数名匹配。
-        boolean methodMatched = normalizedLine.contains("def " + normalizedQuery + "(")
-                || normalizedLine.contains("function " + normalizedQuery + "(")
-                || normalizedLine.contains("func " + normalizedQuery + "(")
-                || normalizedLine.contains("fn " + normalizedQuery + "(")
-                || normalizedLine.contains(normalizedQuery + "(")
-                || normalizedLine.contains("const " + normalizedQuery + " =")
-                || normalizedLine.contains("let " + normalizedQuery + " =")
-                || normalizedLine.contains("var " + normalizedQuery + " ="); // 第一版使用关键词和括号判断方法。
+                                          SearchOptions options,
+                                          CodeLanguage codeLanguage) { // 方法名/函数名匹配。
+        if (codeLanguage.isMethodSearchFallbackToKeyword()) { // SQL 等语言的 METHOD 搜索按关键词处理。
+            return matchKeywordLine(fileName, line, normalizedLine, normalizedQuery, options); // 保持结果排序和关键词语义。
+        }
+        boolean methodMatched = codeLanguage.matchesFunctionDeclaration(line, query, options.caseSensitive()); // 使用语言注册表中的方法规则。
         if (!methodMatched) { // 未命中方法模式。
             return MatchDecision.notMatched(); // 返回未命中。
         }
@@ -400,7 +398,7 @@ public class SearchCodeTool extends AbstractAiTool { // 项目代码搜索业务
         result.filePath = toWorkspaceRelativePath(filePath); // 返回相对 workspace 路径。
         result.fileName = fileName; // 返回文件名。
         result.extension = projectPathGuard.getExtension(fileName); // 返回扩展名。
-        result.language = resolveLanguage(result.extension); // 返回语言名。
+        result.language = CodeLanguageRegistry.resolveByFileName(fileName).getDisplayName(); // 返回注册表识别的语言名。
         result.lineNumber = Math.max(1, lineIndex + 1); // 行号从 1 开始。
         result.matchType = decision.matchType(); // 返回匹配类型。
         result.matchedLine = safeMatchedLine(decision.matchedLine()); // 返回命中行。
@@ -524,7 +522,21 @@ public class SearchCodeTool extends AbstractAiTool { // 项目代码搜索业务
         if (normalizedQuery == null) { // query 为空。
             return SEARCH_TYPE_KEYWORD; // 兜底关键词。
         }
-        if (normalizedQuery.endsWith("()")) { // saveNote() 这类表达。
+        String lowerQuery = normalizedQuery.toLowerCase(Locale.ROOT); // 用于识别英文意图词。
+        if (normalizedQuery.startsWith("@")) { // 注解搜索。
+            return SEARCH_TYPE_KEYWORD; // 注解保持关键词搜索。
+        }
+        if (containsAny(normalizedQuery, "/", "_", "-", ".", "#", ":")) { // 路径、蛇形命名和带符号关键词。
+            return SEARCH_TYPE_KEYWORD; // 保持普通文本搜索。
+        }
+        if (containsAny(lowerQuery, "function", "method", "函数", "方法")) { // 查询词本身带方法意图。
+            return SEARCH_TYPE_METHOD; // 识别为方法搜索。
+        }
+        if (containsAny(lowerQuery, "class", "interface", "接口", "类")) { // 查询词本身带类/接口意图。
+            return SEARCH_TYPE_CLASS; // 识别为类搜索。
+        }
+        if (normalizedQuery.endsWith("()")
+                || (Character.isLowerCase(normalizedQuery.charAt(0)) && normalizedQuery.contains("("))) { // saveNote()/saveNote( 这类表达。
             return SEARCH_TYPE_METHOD; // 视为方法搜索。
         }
         if (CLASS_NAME_PATTERN.matcher(normalizedQuery).matches()) { // 首字母大写且像类名。
@@ -582,7 +594,37 @@ public class SearchCodeTool extends AbstractAiTool { // 项目代码搜索业务
         }
         return normalizedQuery.endsWith("()")
                 ? normalizedQuery.substring(0, normalizedQuery.length() - 2)
-                : normalizedQuery; // 去掉末尾括号。
+                : trimTrailingOpenParenthesis(normalizedQuery); // 去掉末尾括号。
+    }
+
+    private boolean isComponentClassFallbackMatch(String fileName,
+                                                  String normalizedLine,
+                                                  String normalizedQuery,
+                                                  SearchOptions options) { // Vue/Svelte 组件类搜索辅助规则。
+        if (!fileBaseNameMatchesQuery(fileName, normalizedQuery, options.caseSensitive())) { // 文件名必须匹配组件名。
+            return false; // 避免 export default 命中所有组件文件。
+        }
+        return containsAny(normalizedLine,
+                "export default",
+                "definecomponent",
+                "const " + normalizedQuery + " =",
+                "class " + normalizedQuery); // 只在脚本声明行辅助命中。
+    }
+
+    private boolean fileBaseNameMatchesQuery(String fileName,
+                                             String normalizedQuery,
+                                             boolean caseSensitive) { // 判断文件基础名是否等于查询词。
+        if (fileName == null || fileName.isBlank() || normalizedQuery == null || normalizedQuery.isBlank()) { // 空值不匹配。
+            return false; // 返回 false。
+        }
+        String normalizedFileName = normalizeForMatch(fileName, caseSensitive); // 文件名按大小写规则归一。
+        int dotIndex = normalizedFileName.lastIndexOf('.'); // 找扩展名前的点。
+        String baseName = dotIndex > 0 ? normalizedFileName.substring(0, dotIndex) : normalizedFileName; // 提取基础名。
+        return baseName.equals(normalizedQuery); // 组件名需精确匹配文件基础名。
+    }
+
+    private String trimTrailingOpenParenthesis(String query) { // 清理 methodName( 形式。
+        return query.endsWith("(") ? query.substring(0, query.length() - 1).trim() : query; // 去掉单个末尾左括号。
     }
 
     private boolean containsAny(String text, String... keywords) { // 判断文本是否包含任一关键词。
@@ -602,35 +644,6 @@ public class SearchCodeTool extends AbstractAiTool { // 项目代码搜索业务
             return ""; // 返回空。
         }
         return caseSensitive ? text : text.toLowerCase(Locale.ROOT); // 默认不区分大小写。
-    }
-
-    private String resolveLanguage(String extension) { // 根据扩展名推断语言。
-        String ext = extension == null ? "" : extension.toLowerCase(Locale.ROOT); // 标准化扩展名。
-        return switch (ext) {
-            case "java" -> "Java";
-            case "kt", "kts" -> "Kotlin";
-            case "groovy" -> "Groovy";
-            case "scala" -> "Scala";
-            case "py" -> "Python";
-            case "js", "jsx" -> "JavaScript";
-            case "ts", "tsx" -> "TypeScript";
-            case "vue" -> "Vue";
-            case "svelte" -> "Svelte";
-            case "go" -> "Go";
-            case "rs" -> "Rust";
-            case "c", "h", "cpp", "cc", "cxx", "hpp", "hxx" -> "C/C++";
-            case "cs", "csproj", "sln" -> ".NET";
-            case "php" -> "PHP";
-            case "rb" -> "Ruby";
-            case "swift" -> "Swift";
-            case "m", "mm" -> "Objective-C";
-            case "sql" -> "SQL";
-            case "sh", "bash", "zsh", "ps1", "bat", "cmd" -> "Shell";
-            case "html", "css", "scss", "less", "xml" -> "Web";
-            case "json", "yaml", "yml", "properties", "toml", "ini", "env.example" -> "Config";
-            case "md", "txt" -> "Text";
-            default -> "Code";
-        }; // 返回语言分类。
     }
 
     private String toWorkspaceRelativePath(Path path) { // 将绝对路径转换为相对 workspace 路径。
