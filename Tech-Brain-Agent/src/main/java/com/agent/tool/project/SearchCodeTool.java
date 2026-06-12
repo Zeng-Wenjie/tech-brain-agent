@@ -587,14 +587,43 @@ public class SearchCodeTool extends AbstractAiTool { // 项目代码搜索业务
         return normalizedFileName.contains(normalizedQuery) ? 100 : 0; // 文件名包含 query 次高加分。
     }
 
-    private String cleanMethodQuery(String query) { // 清理方法 query。
+    private String cleanMethodQuery(String query) { // 清理类/方法 query，去掉自然语言里的意图词和尾随括号。
         String normalizedQuery = trimToNull(query); // 去空白。
         if (normalizedQuery == null) { // 为空。
             return ""; // 返回空。
         }
-        return normalizedQuery.endsWith("()")
+        String cleanedQuery = normalizedQuery.endsWith("()")
                 ? normalizedQuery.substring(0, normalizedQuery.length() - 2)
-                : trimTrailingOpenParenthesis(normalizedQuery); // 去掉末尾括号。
+                : trimTrailingOpenParenthesis(normalizedQuery); // 先去掉末尾括号。
+        cleanedQuery = stripIntentPrefix(cleanedQuery); // 兼容 “method execute”“class AgentController” 这类前缀表达。
+        cleanedQuery = stripIntentSuffix(cleanedQuery); // 兼容 “execute method”“AgentController class”“xxx 方法” 这类后缀表达。
+        return trimToNull(cleanedQuery) == null ? "" : cleanedQuery.trim(); // 返回清理后的查询词。
+    }
+
+    private String stripIntentPrefix(String query) { // 去掉 query 开头的类/方法意图词。
+        String normalizedQuery = trimToNull(query); // 空值兜底。
+        if (normalizedQuery == null) { // 空 query 直接返回空。
+            return ""; // 返回空字符串。
+        }
+        for (String prefix : new String[]{"method ", "function ", "class ", "interface ", "方法 ", "函数 ", "类 ", "接口 "}) { // 仅移除明确前缀。
+            if (normalizedQuery.regionMatches(true, 0, prefix, 0, prefix.length())) { // 英文大小写不敏感，中文自然兼容。
+                return normalizedQuery.substring(prefix.length()).trim(); // 去掉前缀后返回。
+            }
+        }
+        return normalizedQuery; // 未命中前缀时原样返回。
+    }
+
+    private String stripIntentSuffix(String query) { // 去掉 query 末尾的类/方法意图词。
+        String normalizedQuery = trimToNull(query); // 空值兜底。
+        if (normalizedQuery == null) { // 空 query 直接返回空。
+            return ""; // 返回空字符串。
+        }
+        for (String suffix : new String[]{" method", " function", " class", " interface", " 方法", " 函数", " 类", " 接口"}) { // 仅移除明确后缀。
+            if (normalizedQuery.regionMatches(true, normalizedQuery.length() - suffix.length(), suffix, 0, suffix.length())) { // 英文大小写不敏感。
+                return normalizedQuery.substring(0, normalizedQuery.length() - suffix.length()).trim(); // 去掉后缀后返回。
+            }
+        }
+        return normalizedQuery; // 未命中后缀时原样返回。
     }
 
     private boolean isComponentClassFallbackMatch(String fileName,

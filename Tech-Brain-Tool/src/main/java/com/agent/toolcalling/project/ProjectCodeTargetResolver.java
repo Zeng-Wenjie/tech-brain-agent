@@ -2,6 +2,8 @@ package com.agent.toolcalling.project;
 
 import org.springframework.stereotype.Component;
 
+import java.util.Collection;
+import java.util.Comparator;
 import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -36,6 +38,10 @@ public class ProjectCodeTargetResolver { // 项目代码统一目标解析器。
     private static final Pattern ENDPOINT_PATTERN = Pattern.compile("(/[A-Za-z0-9_{}\\-]+(?:/[A-Za-z0-9_{}\\-]+)*)"); // 至少一段 / 开头路径。
     // 方法名：识别“sendMessage 方法 / execute 方法调用链 / xxx 函数”里的方法名。
     private static final Pattern METHOD_NAME_PATTERN = Pattern.compile("([A-Za-z_$][A-Za-z0-9_$]*)\\s*(?:方法|函数|method)"); // 方法名直接接“方法/函数/method”。
+    // Tool 类名：识别 SearchCodeTool、ReadProjectFileTool.java 这类 AI Tool 目标。
+    private static final Pattern TOOL_CLASS_NAME_PATTERN = Pattern.compile("\\b([A-Za-z_$][A-Za-z0-9_$]*Tool)(?:\\.java)?\\b"); // 只识别以 Tool 结尾的类名。
+    // Tool 名称：识别“searchCode Tool / readProjectFile 工具”这类 toolName 目标。
+    private static final Pattern TOOL_NAME_HINT_PATTERN = Pattern.compile("\\b([a-z][A-Za-z0-9_$]{2,})\\s*(?:Tool|tool|工具)\\b"); // 小驼峰 toolName + Tool/工具。
 
     private static final Set<String> METHOD_STOP_WORDS = Set.of( // 方法名提取需要排除的停用词。
             "this", "new", "return", "class", "interface", "controller", "service",
@@ -100,6 +106,46 @@ public class ProjectCodeTargetResolver { // 项目代码统一目标解析器。
     }
 
     /**
+     * 从用户消息中提取 AI Tool 类名，例如 SearchCodeTool 或 ReadProjectFileTool.java。
+     */
+    public String extractToolClassName(String message) { // Tool 类名提取入口，供 P5.4 Tool→Service 路由复用。
+        if (message == null || message.isBlank()) { // 空消息没有 Tool 类名。
+            return null; // 返回 null。
+        }
+        Matcher matcher = TOOL_CLASS_NAME_PATTERN.matcher(message); // 匹配 XxxTool。
+        while (matcher.find()) { // 逐个检查候选。
+            String candidate = matcher.group(1); // 候选 Tool 类名。
+            if (candidate != null && !"Tool".equals(candidate)) { // 排除纯 Tool 单词。
+                return candidate; // 返回 Tool 类名。
+            }
+        }
+        return null; // 未找到 Tool 类名。
+    }
+
+    /**
+     * 从用户消息中提取 AI Tool 的 toolName。优先使用已注册工具名集合做精确匹配，避免把普通英文单词误判成工具名。
+     */
+    public String extractToolName(String message, Collection<String> knownToolNames) { // Tool 名称提取入口。
+        if (message == null || message.isBlank()) { // 空消息没有工具名。
+            return null; // 返回 null。
+        }
+        if (knownToolNames != null && !knownToolNames.isEmpty()) { // 有已知工具名时优先精确匹配。
+            return knownToolNames.stream()
+                    .filter(name -> name != null && !name.isBlank()) // 跳过空工具名。
+                    .sorted(Comparator.comparingInt(String::length).reversed()) // 长名称优先，避免 readFile 抢 readProjectFile。
+                    .filter(name -> Pattern.compile("(?i)(?<![A-Za-z0-9_$])" + Pattern.quote(name) + "(?![A-Za-z0-9_$])")
+                            .matcher(message).find()) // 按单词边界匹配 toolName。
+                    .findFirst()
+                    .orElse(null); // 未命中返回 null。
+        }
+        Matcher matcher = TOOL_NAME_HINT_PATTERN.matcher(message); // 兜底识别“xxx Tool/工具”。
+        if (matcher.find()) { // 命中提示形态。
+            return matcher.group(1); // 返回 toolName 候选。
+        }
+        return null; // 未找到 toolName。
+    }
+
+    /**
      * 统一解析项目代码目标，确定目标类型、是否允许使用 projectFileFocus。
      *
      * @param message            用户消息
@@ -126,18 +172,18 @@ public class ProjectCodeTargetResolver { // 项目代码统一目标解析器。
         }
         // 2. 明确文件路径/类名：全项目定位文件/类，不绑定 focus。
         if (explicitProjectPath != null && !explicitProjectPath.isBlank()) { // 命中明确路径或类名。
+            ProjectCodeTargetResolution.TargetType targetType = resolveExplicitTargetType(explicitProjectPath); // 区分普通文件/类和 AI Tool 目标。
             return ProjectCodeTargetResolution.builder()
                     .success(true)
-                    .targetType(explicitProjectPath.toLowerCase(Locale.ROOT).endsWith(".java")
-                            && !explicitProjectPath.contains("/")
-                            ? ProjectCodeTargetResolution.TargetType.CLASS
-                            : ProjectCodeTargetResolution.TargetType.FILE)
+                    .targetType(targetType)
                     .confidence(ProjectCodeTargetResolution.Confidence.EXACT)
                     .query(explicitProjectPath)
                     .path(explicitProjectPath)
                     .className(deriveClassName(explicitProjectPath))
                     .useFocus(false) // 明确文件/类名绝不使用 focus。
-                    .message("识别到明确文件或类名，需全项目定位。")
+                    .message(targetType == ProjectCodeTargetResolution.TargetType.TOOL
+                            ? "识别到明确 AI Tool 目标，需全项目定位 Tool 文件。"
+                            : "识别到明确文件或类名，需全项目定位。")
                     .build(); // 返回 FILE/CLASS 目标。
         }
         // 3. 方法名（无类名）：全项目搜索方法声明，不绑定 focus。
@@ -181,7 +227,27 @@ public class ProjectCodeTargetResolver { // 项目代码统一目标解析器。
     public boolean hasExplicitTarget(String message, String explicitProjectPath) { // 明确目标判断，供 focus 门控复用。
         return extractEndpoint(message) != null
                 || (explicitProjectPath != null && !explicitProjectPath.isBlank())
+                || extractToolClassName(message) != null
                 || extractMethodName(message) != null; // 任一明确目标命中即视为有明确目标。
+    }
+
+    private ProjectCodeTargetResolution.TargetType resolveExplicitTargetType(String explicitProjectPath) { // 将明确目标进一步区分为 FILE/CLASS/TOOL。
+        String normalized = explicitProjectPath == null ? "" : explicitProjectPath.replace('\\', '/'); // 统一分隔符。
+        String lower = normalized.toLowerCase(Locale.ROOT); // 小写便于判断路径。
+        String className = deriveClassName(normalized); // 尝试推导类名。
+        if (looksLikeToolTarget(normalized, className)) { // AI Tool 文件或类名。
+            return ProjectCodeTargetResolution.TargetType.TOOL; // 返回 TOOL 目标。
+        }
+        if (lower.endsWith(".java") && !normalized.contains("/")) { // 仅 Java 文件名时视为类目标。
+            return ProjectCodeTargetResolution.TargetType.CLASS; // 返回 CLASS。
+        }
+        return ProjectCodeTargetResolution.TargetType.FILE; // 其它明确路径视为 FILE。
+    }
+
+    private boolean looksLikeToolTarget(String normalizedPath, String className) { // 判断明确目标是否像 AI Tool。
+        String safePath = normalizedPath == null ? "" : normalizedPath; // 路径兜底。
+        String safeClassName = className == null ? safePath : className; // 类名兜底。
+        return safeClassName.endsWith("Tool") || safePath.contains("/tool/") || safePath.endsWith("Tool.java"); // 命中 Tool 类名或 tool 包路径。
     }
 
     private String deriveClassName(String explicitProjectPath) { // 从文件路径/文件名推导类名。
