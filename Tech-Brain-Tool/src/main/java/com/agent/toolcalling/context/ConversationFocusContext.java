@@ -5,10 +5,12 @@ import java.time.LocalDateTime; // 保存焦点更新时间。
 /**
  * 会话最近命中文档焦点上下文。
  *
- * <p>适用场景：保存当前会话的轻量焦点元信息，支持 RAG 文章焦点、用户上传文件 activeFileFocus 和项目源码 projectFileFocus。</p>
+ * <p>适用场景：保存当前会话的轻量焦点元信息，支持 RAG 文章焦点、用户上传文件 activeFileFocus、项目源码 projectFileFocus
+ * 和最近明确项目目标 recentProjectTarget。</p>
  * <p>当前调用链包括：RagSearchTool 命中文档 -> ConversationFocusService.saveLastHitArticle -> Redis 保存 ARTICLE；
  * ReadFileTool 成功读取用户上传文件 -> ConversationFocusService.saveActiveFileFocus -> Redis 保存 FILE；
- * ReadProjectFileTool 成功读取项目源码文件 -> ConversationFocusService.saveProjectFileFocus -> Redis 保存 PROJECT_FILE。</p>
+ * ReadProjectFileTool 成功读取项目源码文件 -> ConversationFocusService.saveProjectFileFocus -> Redis 保存 PROJECT_FILE；
+ * SearchCodeTool 唯一定位项目文件 -> ConversationFocusService.saveRecentProjectTarget -> Redis 保存 PROJECT_TARGET。</p>
  * <p>本类位于 Tech-Brain-Tool 公共模块，只描述通用会话焦点数据，不依赖具体 Tool、Milvus、数据库表或项目文件读取实现。</p>
  */
 public class ConversationFocusContext { // 会话最近命中文档焦点DTO。
@@ -39,6 +41,12 @@ public class ConversationFocusContext { // 会话最近命中文档焦点DTO。
     private Boolean truncated; // 项目文件最近读取时是否发生截断，仅用于 PROJECT_FILE。
 
     private String readMode; // 项目文件最近读取模式，SUMMARY 或 FULL，仅用于 PROJECT_FILE。
+
+    private String className; // 最近项目目标类名，仅用于 PROJECT_TARGET 或 Java 项目文件焦点。
+
+    private String targetType; // 最近项目目标类型，例如 CLASS_OR_FILE、TOOL、CONTROLLER，仅用于 PROJECT_TARGET。
+
+    private String confidence; // 最近项目目标置信度，例如 UNIQUE，仅用于 PROJECT_TARGET。
 
     private LocalDateTime updateTime; // 焦点更新时间。
 
@@ -152,6 +160,30 @@ public class ConversationFocusContext { // 会话最近命中文档焦点DTO。
 
     public void setReadMode(String readMode) { // 设置项目文件最近读取模式。
         this.readMode = readMode; // 保存读取模式。
+    }
+
+    public String getClassName() { // 获取最近项目目标类名。
+        return className; // 返回 className。
+    }
+
+    public void setClassName(String className) { // 设置最近项目目标类名。
+        this.className = className; // 保存 className。
+    }
+
+    public String getTargetType() { // 获取最近项目目标类型。
+        return targetType; // 返回 targetType。
+    }
+
+    public void setTargetType(String targetType) { // 设置最近项目目标类型。
+        this.targetType = targetType; // 保存 targetType。
+    }
+
+    public String getConfidence() { // 获取最近项目目标置信度。
+        return confidence; // 返回 confidence。
+    }
+
+    public void setConfidence(String confidence) { // 设置最近项目目标置信度。
+        this.confidence = confidence; // 保存 confidence。
     }
 
     public LocalDateTime getUpdateTime() { // 获取更新时间。

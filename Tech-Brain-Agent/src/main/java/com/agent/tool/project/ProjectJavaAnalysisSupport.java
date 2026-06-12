@@ -21,12 +21,12 @@ import java.util.stream.Stream;
 /**
  * 项目 Java 源码轻量静态分析公共支持组件（P5 代码分析能力复用层）。
  *
- * <p>适用场景：P5 系列代码分析 Tool（如 analyzeCallChain、analyzeControllerServiceChain）都需要在不引入
+ * <p>适用场景：analyzeCode 内部 P5 系列 Analyzer（如 CallChainAnalyzer、ControllerServiceChainAnalyzer）都需要在不引入
  * Tree-sitter / 完整 AST 的前提下，对单个 Java 文件做行扫描级别的解析：去注释、扫描方法体范围、提取注入依赖字段、
  * 提取方法体内的调用候选、按类型名在 workspace 内安全查找候选文件。本组件把这些通用原语集中实现一处，
  * 供多个 Tool 复用，避免在每个 Tool 内重复编写相同的解析代码。</p>
  *
- * <p>调用链：具体分析 Tool 注入本组件
+ * <p>调用链：具体内部 Analyzer 注入本组件
  * -> resolveReadableProjectFile 安全解析路径（复用 ProjectPathGuard 边界）
  * -> stripComments 去掉行/块注释，保留字符串字面量
  * -> scanJavaMethods 基于大括号计数得到方法体范围和方法注解
@@ -37,7 +37,7 @@ import java.util.stream.Stream;
  * <p>边界说明：本组件只做静态文本级解析，不修改文件，不访问 workspace 外路径，不接入 RAG/Milvus/向量化，
  * 不做完整精准 AST，不保证百分百精准；它不是 AI Tool 本体，不进入 ToolRegistry，仅作为内部复用支持类。</p>
  */
-@Component // 注册为 Spring Bean，供 P5 各分析 Tool 构造器注入复用。
+@Component // 注册为 Spring Bean，供 P5 各内部 Analyzer 构造器注入复用。
 public class ProjectJavaAnalysisSupport { // 项目 Java 源码轻量解析复用支持组件。
     private static final int MAX_FILENAME_MATCHES = 50; // 按文件名搜索候选时最多收集的数量，避免大项目扫描过多。
     private static final int MAX_CALL_EXPRESSION_CHARS = 200; // 单条调用表达式最长字符数。

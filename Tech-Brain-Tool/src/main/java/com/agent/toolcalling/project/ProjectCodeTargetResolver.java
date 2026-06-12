@@ -13,18 +13,18 @@ import java.util.regex.Pattern;
  * 项目代码统一目标解析器（P5 路由复用组件）。
  *
  * <p>适用场景：6 个项目代码工具（listProjectTree / searchCode / readProjectFile / analyzeCode /
- * analyzeCallChain / analyzeControllerServiceChain）在路由阶段都需要回答同一个问题：
+ * analyzeCode 内部不同 analysisType（STRUCTURE / CALL_CHAIN / CONTROLLER_SERVICE 等）在路由阶段都需要回答同一个问题：
  * “用户这一轮指向的是接口路径、类名、文件、方法名，还是仅仅是‘这个类/这个接口/继续分析’这类指代？
- * 是否允许使用上一轮的 projectFileFocus？” 过去这套判断分散在各 force 分支里，容易让 projectFileFocus
+ * 是否允许使用上一轮的 recentProjectTarget 或 projectFileFocus？” 过去这套判断分散在各 force 分支里，容易让 projectFileFocus
  * 把明确目标锁死。本组件把目标解析与优先级集中到一处，供所有项目代码工具路由复用。</p>
  *
- * <p>统一优先级：<b>明确目标 &gt; 全项目扫描解析目标 &gt; projectFileFocus</b>，即
- * endpoint &gt; 明确文件/类名(path) &gt; 方法名 &gt; projectFileFocus。只要用户给了 endpoint / 类名 /
+ * <p>统一优先级：<b>明确目标 &gt; 全项目扫描解析目标 &gt; recentProjectTarget &gt; projectFileFocus</b>，即
+ * endpoint &gt; 明确文件/类名(path) &gt; 方法名 &gt; recentProjectTarget &gt; projectFileFocus。只要用户给了 endpoint / 类名 /
  * 文件名 / 方法名，就必须走全项目扫描，不允许被当前 focus 限制；只有“这个类 / 这个接口 / 继续分析 / 给我代码”
- * 这类没有明确目标的指代追问，才允许使用 projectFileFocus。</p>
+ * 这类没有明确目标的指代追问，才允许先使用 recentProjectTarget，再回退 projectFileFocus。</p>
  *
  * <p>调用链：ToolCallingChatServiceImpl 路由阶段
- * -> resolve(userMessage, explicitProjectPath, hasProjectFocus, controllerFocus) 得到 {@link ProjectCodeTargetResolution}
+ * -> resolve(userMessage, explicitProjectPath, hasRecentProjectTarget, hasProjectFocus, controllerFocus) 得到 {@link ProjectCodeTargetResolution}
  * -> 各 force 分支据此决定调用哪个工具、用 endpoint 还是 path、是否允许 focus
  * -> 真正的全项目扫描由工具在 Tech-Brain-Agent 内基于 ProjectPathGuard 完成（覆盖所有子模块）。</p>
  *
@@ -146,15 +146,17 @@ public class ProjectCodeTargetResolver { // 项目代码统一目标解析器。
     }
 
     /**
-     * 统一解析项目代码目标，确定目标类型、是否允许使用 projectFileFocus。
+     * 统一解析项目代码目标，确定目标类型、是否允许使用 recentProjectTarget 或 projectFileFocus。
      *
      * @param message            用户消息
      * @param explicitProjectPath 调用方复用既有解析得到的明确文件路径/类名定位结果（可空）
+     * @param hasRecentProjectTarget 当前会话是否有可用 recentProjectTarget
      * @param hasProjectFocus    当前会话是否有可用 projectFileFocus
      * @param controllerFocus    当前 projectFileFocus 是否指向 Controller 文件
      */
     public ProjectCodeTargetResolution resolve(String message,
                                                String explicitProjectPath,
+                                               boolean hasRecentProjectTarget,
                                                boolean hasProjectFocus,
                                                boolean controllerFocus) { // 统一目标解析主入口。
         // 1. endpoint 优先级最高：全项目扫描 Controller，不绑定 focus、不用上一轮 Controller。
@@ -199,7 +201,27 @@ public class ProjectCodeTargetResolver { // 项目代码统一目标解析器。
                     .message("识别到方法名，需全项目搜索方法声明。")
                     .build(); // 返回 METHOD 目标。
         }
-        // 4. 无明确目标：只有指代追问才允许使用 projectFileFocus。
+        // 4. 无明确目标：只有指代追问才允许使用 recentProjectTarget/projectFileFocus。
+        if (!isReferenceFollowUp(message)) { // 普通闲聊或没有项目指代语义的问题不能使用上下文目标。
+            return ProjectCodeTargetResolution.builder()
+                    .success(false)
+                    .targetType(ProjectCodeTargetResolution.TargetType.UNKNOWN)
+                    .confidence(ProjectCodeTargetResolution.Confidence.NONE)
+                    .useFocus(false)
+                    .message("未识别到明确项目代码目标，也不是项目目标指代追问。")
+                    .build(); // 返回 UNKNOWN。
+        }
+        // 5. 指代追问优先使用 recentProjectTarget。
+        if (hasRecentProjectTarget) { // 有最近明确项目目标。
+            return ProjectCodeTargetResolution.builder()
+                    .success(true)
+                    .targetType(ProjectCodeTargetResolution.TargetType.RECENT_PROJECT_TARGET)
+                    .confidence(ProjectCodeTargetResolution.Confidence.UNIQUE)
+                    .useFocus(true) // 指代追问场景可使用最近明确目标。
+                    .message("无明确目标，使用最近明确项目目标。")
+                    .build(); // 返回 RECENT_PROJECT_TARGET 目标。
+        }
+        // 6. 无明确目标且没有 recentProjectTarget：才允许使用 projectFileFocus。
         if (hasProjectFocus) { // 有可用 focus。
             return ProjectCodeTargetResolution.builder()
                     .success(true)
@@ -211,7 +233,7 @@ public class ProjectCodeTargetResolver { // 项目代码统一目标解析器。
                             : "无明确目标，使用当前项目文件焦点。")
                     .build(); // 返回 FOCUS 目标。
         }
-        // 5. 既无明确目标也无 focus。
+        // 7. 既无明确目标也无 focus。
         return ProjectCodeTargetResolution.builder()
                 .success(false)
                 .targetType(ProjectCodeTargetResolution.TargetType.UNKNOWN)
@@ -221,8 +243,36 @@ public class ProjectCodeTargetResolver { // 项目代码统一目标解析器。
                 .build(); // 返回 UNKNOWN。
     }
 
+    private boolean isReferenceFollowUp(String message) { // 判断当前消息是否是“它/这个类/刚才那个/继续分析”等项目目标指代追问。
+        if (message == null || message.isBlank()) { // 空消息不是追问。
+            return false; // 返回false。
+        }
+        String normalizedMessage = message.toLowerCase(Locale.ROOT); // 统一小写兼容 Tool/controller 等英文。
+        return normalizedMessage.contains("它")
+                || normalizedMessage.contains("这个")
+                || normalizedMessage.contains("当前")
+                || normalizedMessage.contains("刚才")
+                || normalizedMessage.contains("刚刚")
+                || normalizedMessage.contains("上面")
+                || normalizedMessage.contains("继续")
+                || normalizedMessage.contains("这个类")
+                || normalizedMessage.contains("这个文件")
+                || normalizedMessage.contains("这个工具")
+                || normalizedMessage.contains("这个接口")
+                || normalizedMessage.contains("这个 controller")
+                || normalizedMessage.contains("这个controller")
+                || normalizedMessage.contains("这个 tool")
+                || normalizedMessage.contains("这个tool")
+                || normalizedMessage.contains("分析它")
+                || normalizedMessage.contains("给我它")
+                || normalizedMessage.contains("its")
+                || normalizedMessage.contains("this class")
+                || normalizedMessage.contains("this file")
+                || normalizedMessage.contains("this tool"); // 只允许明确指代词触发上下文回退。
+    }
+
     /**
-     * 判断消息中是否存在“明确目标”（endpoint / 文件或类名 / 方法名），用于决定是否允许回退 projectFileFocus。
+     * 判断消息中是否存在“明确目标”（endpoint / 文件或类名 / 方法名），用于决定是否允许回退 recentProjectTarget/projectFileFocus。
      */
     public boolean hasExplicitTarget(String message, String explicitProjectPath) { // 明确目标判断，供 focus 门控复用。
         return extractEndpoint(message) != null

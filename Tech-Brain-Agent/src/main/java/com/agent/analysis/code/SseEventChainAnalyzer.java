@@ -1,10 +1,11 @@
-package com.agent.tool.project;
+package com.agent.analysis.code;
 
 import com.agent.security.ProjectPathGuard;
 import com.agent.tool.project.ProjectJavaAnalysisSupport.JavaCall;
 import com.agent.tool.project.ProjectJavaAnalysisSupport.JavaField;
 import com.agent.tool.project.ProjectJavaAnalysisSupport.JavaMethod;
-import com.agent.toolcalling.support.AbstractAiTool;
+import com.agent.tool.project.ProjectJavaAnalysisSupport;
+import com.agent.toolcalling.project.analysis.CodeAnalysisType;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -30,7 +31,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
- * analyzeSseEventChain 前后端 SSE 事件链路分析工具（P5.5）。
+ * 前后端 SSE 事件链路内部分析器（P5.5）。
  *
  * <p>适用场景：当用户要求分析“前端触发点 → 后端 SSE Controller → Service → Tool/业务逻辑 → SSE 事件发送 →
  * 前端事件接收”的完整流式链路时，Tool Calling 调用本工具做跨前后端的轻量静态文本分析。它会按 endpoint、
@@ -38,8 +39,8 @@ import java.util.stream.Stream;
  * Java），定位前端 SSE 请求发起点、前端事件接收点、后端 Controller SSE 接口、Controller→Service 调用、
  * 后端 SSE 事件发送点，并在 maxDepth=2 时尝试展开 Service/Tool 一层调用。</p>
  *
- * <p>调用链：ToolCallingChatServiceImpl 的模型 tool_call 或后端强制 analyzeSseEventChain 路由
- * -> ToolRegistry 根据 analyzeSseEventChain 找到本工具
+ * <p>调用链：ToolCallingChatServiceImpl 的模型 tool_call 或后端强制分析路由
+ * -> ToolRegistry 根据 analyzeCode 找到统一工具
  * -> execute(arguments) 解析 path/endpoint/eventName/frontendKeyword/methodName/maxDepth
  * -> ProjectPathGuard 校验 workspace 边界与文件安全
  * -> ProjectJavaAnalysisSupport 复用 Java 方法、依赖、调用提取（不重复实现）
@@ -49,10 +50,9 @@ import java.util.stream.Stream;
  * 不做完整精准 AST，不做运行时抓包，不调用外部服务，不接入 RAG/Milvus/向量化，不输出完整源码，也不生成风险分析、
  * 测试步骤或 patch；所有事件名、接口、类、文件、方法均来自真实扫描结果，找不到时只返回真实候选，绝不捏造。</p>
  */
-@Slf4j // 仅输出工具名、相对路径、事件名和失败原因，不打印完整源码或服务器绝对路径。
-@Component // 注册为 Spring Bean，让 ToolRegistry 自动暴露 analyzeSseEventChain。
-public class AnalyzeSseEventChainTool extends AbstractAiTool { // P5.5 前后端 SSE 事件链路分析工具。
-    private static final String TOOL_NAME = "analyzeSseEventChain"; // 工具名称必须和模型 tool_call.function.name 一致。
+@Slf4j // 仅输出分析器名、相对路径、事件名和失败原因，不打印完整源码或服务器绝对路径。
+@Component // 注册为内部 Spring Bean，供 AnalyzeCodeTool 分发使用，不会被 ToolRegistry 暴露。
+public class SseEventChainAnalyzer extends AbstractCodeAnalysisHandler { // P5.5 前后端 SSE 事件链路内部分析器。
     private static final String RESULT_TYPE = "sse_event_chain_analysis"; // 工具返回 JSON 的 type 字段。
     private static final String ANALYSIS_WARNING = "当前为轻量静态分析，跨前后端链路为候选结果，不保证百分百精准。"; // 统一不确定性说明。
     private static final int DEFAULT_MAX_DEPTH = 1; // 默认前端→Controller→Service 一层。
@@ -108,15 +108,20 @@ public class AnalyzeSseEventChainTool extends AbstractAiTool { // P5.5 前后端
     private final ProjectPathGuard projectPathGuard; // workspace 路径安全守卫，负责边界、敏感路径和文件类型校验。
     private final ProjectJavaAnalysisSupport support; // P5 公共 Java 轻量解析组件，复用方法扫描、依赖与调用提取。
 
-    public AnalyzeSseEventChainTool(ProjectPathGuard projectPathGuard,
-                                    ProjectJavaAnalysisSupport support) { // 构造器注入安全守卫和公共解析器。
+    public SseEventChainAnalyzer(ProjectPathGuard projectPathGuard,
+                                 ProjectJavaAnalysisSupport support) { // 构造器注入安全守卫和公共解析器。
         this.projectPathGuard = projectPathGuard; // 保存 workspace 安全守卫。
         this.support = support; // 保存 Java 解析复用组件。
     }
 
-    @Override // 实现 AiTool 工具注册名。
+    @Override // 返回 analyzeCode 内部分发类型。
+    public CodeAnalysisType analysisType() {
+        return CodeAnalysisType.SSE_EVENT_CHAIN; // 前后端 SSE 事件链路分析。
+    }
+
+    @Override // 返回内部分析器名。
     public String name() {
-        return TOOL_NAME; // 固定返回 analyzeSseEventChain。
+        return analysisType().name(); // 不再返回旧工具名。
     }
 
     @Override // 实现 AiTool 描述，供模型判断调用边界。
@@ -141,7 +146,7 @@ public class AnalyzeSseEventChainTool extends AbstractAiTool { // P5.5 前后端
         return schema; // 返回无 required 的 schema。
     }
 
-    @Override // 执行 analyzeSseEventChain 工具。
+    @Override // 执行 analyzeCode(SSE_EVENT_CHAIN) 内部分析器。
     public String execute(JsonNode arguments) {
         String pathArg = support.trimToNull(getOptionalText(arguments, "path", null)); // 可选源码文件路径。
         String endpoint = normalizeEndpoint(support.trimToNull(getOptionalText(arguments, "endpoint", null))); // 可选 SSE 接口路径，统一归一化。

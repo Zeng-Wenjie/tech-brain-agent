@@ -138,6 +138,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         List<ChatAttachedFileContext> recentAttachedFiles = loadRecentAttachedFiles(conversation.getId(), userId); // 加载当前会话最近附件，供“这个文件/继续分析”指代解析。
         ChatAttachedFileContext activeFileFocus = loadActiveFileFocus(conversation.getId(), userId); // 加载最近成功readFile的上传文件焦点，优先处理上传附件指代。
         ConversationFocusContext projectFileFocus = loadProjectFileFocus(conversation.getId(), userId); // 加载最近成功readProjectFile的项目源码文件焦点，处理“给我代码/继续分析”等指代。
+        ConversationFocusContext recentProjectTarget = loadRecentProjectTarget(conversation.getId(), userId); // 加载最近一次 searchCode/readProjectFile/analyzeCode 明确定位到的项目目标，优先处理“它/这个类”指代。
 
         log.debug("[ChatMessage] use ToolCallingChatService.chatStream: true"); // 调用细节降级为DEBUG。
         log.debug("[ChatMessage] tool-calling current message: {}", previewContent(modelCurrentMessage)); // 模型内部消息只在DEBUG打印短preview。
@@ -152,6 +153,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         requestContext.setRecentAttachedFiles(recentAttachedFiles); // 最近附件只传安全元信息，用于会话文件焦点记忆。
         requestContext.setActiveFileFocus(activeFileFocus); // 最近成功读取文件焦点只传元信息，用于多附件场景的模糊指代解析。
         requestContext.setProjectFileFocus(projectFileFocus); // 最近成功读取项目源码文件焦点只传相对路径和元信息，不包含文件内容或服务器绝对路径。
+        requestContext.setRecentProjectTarget(recentProjectTarget); // 最近明确项目目标优先于 projectFileFocus，不包含文件内容或服务器绝对路径。
         requestContext.setToolCallLogRecorder(buildToolCallLogRecorder()); // 注入日志回调，避免Tech-Brain-Tool模块直接依赖Agent服务。
         toolCallingChatService.chatStream(modelCurrentMessage, memorySummary, toolHistoryMessages, requestContext, new ToolCallingStreamCallback() { // 传入长期记忆、结构化历史和工具上下文，禁止恢复multiTurnQuestion。
             @Override
@@ -360,6 +362,24 @@ public class ChatMessageServiceImpl implements ChatMessageService {
             return focus; // 返回 projectFileFocus 元信息。
         } catch (Exception e) {
             log.warn("[ChatMessage] load project file focus failed, conversationId: {}, userId: {}",
+                    conversationId, userId, e); // 读取失败不能影响聊天主流程。
+            return null; // 兜底为空。
+        }
+    }
+
+    private ConversationFocusContext loadRecentProjectTarget(Long conversationId, Long userId) {
+        if (conversationId == null || userId == null) { // 缺少会话或用户时不能读取 recentProjectTarget。
+            return null; // 返回空目标。
+        }
+        try {
+            ConversationFocusContext target = conversationFocusService.getRecentProjectTarget(userId, conversationId); // 按当前用户和会话读取最近明确项目目标。
+            if (target == null || target.getPath() == null || target.getPath().isBlank()) { // 没有最近项目目标。
+                return null; // 返回空目标。
+            }
+            log.debug("[ChatMessage] recent project target loaded, path: {}", target.getPath()); // 只打印 workspace 相对路径，不打印绝对路径或文件内容。
+            return target; // 返回 recentProjectTarget 元信息。
+        } catch (Exception e) {
+            log.warn("[ChatMessage] load recent project target failed, conversationId: {}, userId: {}",
                     conversationId, userId, e); // 读取失败不能影响聊天主流程。
             return null; // 兜底为空。
         }

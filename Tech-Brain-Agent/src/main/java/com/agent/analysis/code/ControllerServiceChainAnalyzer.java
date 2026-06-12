@@ -1,11 +1,12 @@
-package com.agent.tool.project;
+package com.agent.analysis.code;
 
 import com.agent.security.ProjectPathGuard;
 import com.agent.tool.project.ProjectJavaAnalysisSupport.JavaCall;
 import com.agent.tool.project.ProjectJavaAnalysisSupport.JavaField;
 import com.agent.tool.project.ProjectJavaAnalysisSupport.JavaMethod;
+import com.agent.tool.project.ProjectJavaAnalysisSupport;
+import com.agent.toolcalling.project.analysis.CodeAnalysisType;
 import com.agent.toolcalling.project.language.CodeLanguageRegistry;
-import com.agent.toolcalling.support.AbstractAiTool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -31,27 +32,26 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
- * analyzeControllerServiceChain Spring Controller → Service 调用链分析工具（P5.3）。
+ * Spring Controller → Service 调用链内部分析器（P5.3）。
  *
- * <p>适用场景：当用户在聊天中要求分析某个 Spring Controller 的接口到 Service 的链路、接口背后调用了哪些 Service、
- * 某个 /api 接口后面调用了哪些方法时，Tool Calling 调用本工具做静态文本级分析，提取接口路径、Controller 方法、
+ * <p>适用场景：作为 analyzeCode 的 CONTROLLER_SERVICE 内部 Analyzer，处理 Spring Controller 接口到 Service 的链路、
+ * 接口背后调用了哪些 Service、某个 /api 接口后面调用了哪些方法等请求，提取接口路径、Controller 方法、
  * Service 调用、Service 接口和 ServiceImpl 候选文件，maxDepth=2 时再尝试分析 ServiceImpl 对应方法内部的一层调用。</p>
  *
- * <p>调用链：ToolCallingChatServiceImpl 识别模型 tool_call 或后端强制 analyzeControllerServiceChain 路由
- * -> ToolRegistry 根据工具名获取 AnalyzeControllerServiceChainTool
+ * <p>调用链：ToolCallingChatServiceImpl 将 Controller→Service 类请求统一构造成 analyzeCode.arguments.analysisType=CONTROLLER_SERVICE
+ * -> AnalyzeCodeTool 分发到本分析器
  * -> execute(arguments) 解析 path/endpoint/methodName/maxDepth/includeSnippet/maxItems
  * -> ProjectPathGuard 校验 workspace 边界与敏感文件
  * -> 复用 ProjectJavaAnalysisSupport 完成去注释、方法扫描、依赖提取、调用提取、候选文件定位
- * -> 返回 controller_service_chain_analysis JSON 给模型和 tool_call_log。</p>
+ * -> 返回 controller_service_chain_analysis 内部结果给 AnalyzeCodeTool 包装。</p>
  *
- * <p>边界说明：本工具属于 Tech-Brain-Agent 项目代码业务工具，只做静态文本级分析，不修改文件，不生成/应用 patch，
+ * <p>边界说明：本分析器不继承 AbstractAiTool、不实现 AiTool，不进入 ToolRegistry；只做静态文本级分析，不修改文件，不生成/应用 patch，
  * 不做完整 AST、不做全项目精准调用图、不做 Tool→Service 链路、不做前后端 SSE 链路、不做风险分析、不做测试步骤、
  * 不返回完整源码，不接入 RAG/Milvus/向量化，不返回服务器绝对路径，候选 ServiceImpl 为候选结果不保证百分百精准。</p>
  */
-@Slf4j // 输出 [AnalyzeControllerServiceChainTool] 前缀日志，不打印服务器绝对路径和完整文件内容。
-@Component // 注册为 Spring Bean，让 ToolRegistry 自动发现 analyzeControllerServiceChain 工具。
-public class AnalyzeControllerServiceChainTool extends AbstractAiTool { // Controller → Service 调用链分析业务工具。
-    private static final String TOOL_NAME = "analyzeControllerServiceChain"; // 工具名称必须和模型 tool_call.function.name 一致。
+@Slf4j // 输出 [ControllerServiceChainAnalyzer] 前缀日志，不打印服务器绝对路径和完整文件内容。
+@Component // 注册为内部 Spring Bean，供 AnalyzeCodeTool 分发使用，不会被 ToolRegistry 暴露。
+public class ControllerServiceChainAnalyzer extends AbstractCodeAnalysisHandler { // Controller → Service 调用链内部分析器。
     private static final String RESULT_TYPE = "controller_service_chain_analysis"; // 工具返回 JSON 类型。
     private static final int DEFAULT_MAX_DEPTH = 1; // 默认分析深度（Controller → Service）。
     private static final int MAX_ALLOWED_DEPTH = 2; // 最大分析深度（额外分析 ServiceImpl 一层调用）。
@@ -76,15 +76,20 @@ public class AnalyzeControllerServiceChainTool extends AbstractAiTool { // Contr
     private final ProjectPathGuard projectPathGuard; // P4.1 workspace 路径安全守卫，用于文件安全校验。
     private final ProjectJavaAnalysisSupport support; // P5 Java 解析复用支持组件，避免重复编写解析原语。
 
-    public AnalyzeControllerServiceChainTool(ProjectPathGuard projectPathGuard,
-                                             ProjectJavaAnalysisSupport support) { // 构造器注入路径守卫和解析支持组件。
+    public ControllerServiceChainAnalyzer(ProjectPathGuard projectPathGuard,
+                                          ProjectJavaAnalysisSupport support) { // 构造器注入路径守卫和解析支持组件。
         this.projectPathGuard = projectPathGuard; // 保存路径安全守卫。
         this.support = support; // 保存解析支持组件。
     }
 
-    @Override // 实现 AiTool 工具名。
+    @Override // 返回 analyzeCode 内部分发类型。
+    public CodeAnalysisType analysisType() {
+        return CodeAnalysisType.CONTROLLER_SERVICE; // Controller→Service 专项链路分析。
+    }
+
+    @Override // 返回内部分析器名。
     public String name() {
-        return TOOL_NAME; // 固定返回 analyzeControllerServiceChain。
+        return analysisType().name(); // 不再返回旧工具名。
     }
 
     @Override // 实现 AiTool 工具描述。
@@ -107,7 +112,7 @@ public class AnalyzeControllerServiceChainTool extends AbstractAiTool { // Contr
         return schema; // 返回完整参数 Schema。
     }
 
-    @Override // 执行 analyzeControllerServiceChain 工具。
+    @Override // 执行 analyzeCode(CONTROLLER_SERVICE) 内部分析器。
     public String execute(JsonNode arguments) {
         String requestedPath = support.trimToNull(getOptionalText(arguments, "path", null)); // 读取 Controller 文件路径。
         String endpointFilter = normalizeEndpoint(support.trimToNull(getOptionalText(arguments, "endpoint", null))); // 可选接口路径过滤，统一归一化。
@@ -163,7 +168,7 @@ public class AnalyzeControllerServiceChainTool extends AbstractAiTool { // Contr
 
             if (!isSpringController(classAnnotations, className, relativePath)) { // 校验是否为 Spring Controller。
                 return buildFailureResult(relativePath, endpointFilter,
-                        "该文件未识别为 Spring Controller（无 @RestController/@Controller、类名不以 Controller 结尾、路径不含 controller），如需分析普通类调用链请使用 analyzeCallChain。"); // 返回提示。
+                        "该文件未识别为 Spring Controller（无 @RestController/@Controller、类名不以 Controller 结尾、路径不含 controller），如需分析普通类调用链请使用 analyzeCode 的 CALL_CHAIN 类型。"); // 返回提示。
             }
 
             List<JavaMethod> methods = support.scanJavaMethods(codeLines); // 扫描方法声明、方法体范围和注解。

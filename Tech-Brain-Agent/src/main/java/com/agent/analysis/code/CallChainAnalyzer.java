@@ -1,8 +1,8 @@
-package com.agent.tool.project;
+package com.agent.analysis.code;
 
 import com.agent.security.ProjectPathGuard;
+import com.agent.toolcalling.project.analysis.CodeAnalysisType;
 import com.agent.toolcalling.project.language.CodeLanguageRegistry;
-import com.agent.toolcalling.support.AbstractAiTool;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -28,27 +28,26 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
- * analyzeCallChain 项目源码轻量级调用链分析工具（P5.2）。
+ * 普通源码轻量级调用链内部分析器（P5.2）。
  *
- * <p>适用场景：当用户在聊天中要求分析项目 workspace 内某个源码文件的调用链、调用关系、依赖对象、
- * 方法内部调用、对某个 Service/Mapper/Repository/Tool 的外部调用时，Tool Calling 调用本工具做
- * 静态文本级（行扫描 + 正则）的“调用关系候选”提取。第一版不是完整精准调用图，只给出候选结果。</p>
+ * <p>适用场景：作为 analyzeCode 的 CALL_CHAIN 内部 Analyzer，处理项目 workspace 内某个源码文件的调用链、
+ * 调用关系、依赖对象、方法内部调用、对 Service/Mapper/Repository/Tool 的外部调用等请求，做静态文本级
+ * “调用关系候选”提取。第一版不是完整精准调用图，只给出候选结果。</p>
  *
- * <p>调用链：ToolCallingChatServiceImpl 识别模型 tool_call 或后端强制 analyzeCallChain 路由
- * -> ToolRegistry 根据工具名获取 AnalyzeCallChainTool
+ * <p>调用链：ToolCallingChatServiceImpl 将调用链类请求统一构造成 analyzeCode.arguments.analysisType=CALL_CHAIN
+ * -> AnalyzeCodeTool 分发到本分析器
  * -> execute(arguments) 解析 path/methodName/maxDepth/maxItems/includeSnippet
  * -> ProjectPathGuard 校验 workspace 边界、敏感目录、敏感文件和扩展名
  * -> 按 UTF-8 读取源码并做 Java 优先的轻量调用关系提取
- * -> 返回 call_chain_analysis JSON 给模型和 tool_call_log。</p>
+ * -> 返回 call_chain_analysis 内部结果给 AnalyzeCodeTool 包装。</p>
  *
- * <p>边界说明：本工具属于 Tech-Brain-Agent 项目代码业务工具，不放入 Tech-Brain-Tool 公共模块；
- * 本工具不修改项目文件、不生成/应用 patch、不做完整 AST、不做精准调用图、不做跨仓库调用链、
+ * <p>边界说明：本分析器不继承 AbstractAiTool、不实现 AiTool，不进入 ToolRegistry；
+ * 它不修改项目文件、不生成/应用 patch、不做完整 AST、不做精准调用图、不做跨仓库调用链、
  * 不递归读取大量文件、不接入 RAG/Milvus/向量化、不返回完整源码，也不返回服务器绝对路径。</p>
  */
-@Slf4j // 输出 [AnalyzeCallChainTool] 前缀日志，不打印服务器绝对路径和完整文件内容。
-@Component // 注册为 Spring Bean，让 ToolRegistry 自动发现 analyzeCallChain 工具。
-public class AnalyzeCallChainTool extends AbstractAiTool { // 项目代码调用链分析业务工具，继承公共工具基类复用参数 Schema 和 JSON 辅助能力。
-    private static final String TOOL_NAME = "analyzeCallChain"; // 工具名称必须和模型 tool_call.function.name 一致。
+@Slf4j // 输出 [CallChainAnalyzer] 前缀日志，不打印服务器绝对路径和完整文件内容。
+@Component // 注册为内部 Spring Bean，供 AnalyzeCodeTool 分发使用，不会被 ToolRegistry 暴露。
+public class CallChainAnalyzer extends AbstractCodeAnalysisHandler { // 项目代码调用链内部分析器。
     private static final String RESULT_TYPE = "call_chain_analysis"; // 工具返回 JSON 类型。
     private static final int DEFAULT_MAX_DEPTH = 1; // 默认调用链分析深度。
     private static final int MAX_ALLOWED_DEPTH = 2; // 第一版最大调用链分析深度。
@@ -90,13 +89,18 @@ public class AnalyzeCallChainTool extends AbstractAiTool { // 项目代码调用
 
     private final ProjectPathGuard projectPathGuard; // P4.1 workspace 路径安全守卫，复用 analyzeCode 的安全策略。
 
-    public AnalyzeCallChainTool(ProjectPathGuard projectPathGuard) { // 构造器注入路径守卫，保持和现有项目 Tool 风格一致。
+    public CallChainAnalyzer(ProjectPathGuard projectPathGuard) { // 构造器注入路径守卫，保持现有安全策略一致。
         this.projectPathGuard = projectPathGuard; // 保存路径安全守卫。
     }
 
-    @Override // 实现 AiTool 工具名。
+    @Override // 返回 analyzeCode 内部分发类型。
+    public CodeAnalysisType analysisType() {
+        return CodeAnalysisType.CALL_CHAIN; // 普通调用链分析。
+    }
+
+    @Override // 返回内部分析器名。
     public String name() {
-        return TOOL_NAME; // 固定返回 analyzeCallChain。
+        return analysisType().name(); // 不再返回旧工具名。
     }
 
     @Override // 实现 AiTool 工具描述。
@@ -118,7 +122,7 @@ public class AnalyzeCallChainTool extends AbstractAiTool { // 项目代码调用
         return schema; // 返回完整参数 Schema。
     }
 
-    @Override // 执行 analyzeCallChain 工具。
+    @Override // 执行 analyzeCode(CALL_CHAIN) 内部分析器。
     public String execute(JsonNode arguments) {
         String requestedPath = trimToNull(getOptionalText(arguments, "path", null)); // 读取相对 workspace 的源码文件路径。
         if (requestedPath == null) { // path 缺失时直接失败。

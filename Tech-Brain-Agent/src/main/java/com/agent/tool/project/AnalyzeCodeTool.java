@@ -1,1003 +1,315 @@
-package com.agent.tool.project;
+package com.agent.tool.project; // 项目代码对外 Tool 包。
 
-import com.agent.security.ProjectPathGuard;
-import com.agent.toolcalling.project.language.CodeLanguage;
-import com.agent.toolcalling.project.language.CodeLanguageRegistry;
-import com.agent.toolcalling.support.AbstractAiTool;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Component;
+import com.agent.analysis.code.CodeAnalysisHandler; // analyzeCode 内部分析器策略接口。
+import com.agent.toolcalling.context.ConversationFocusContext; // 读取 recentProjectTarget 和 projectFileFocus 元信息。
+import com.agent.toolcalling.context.ToolCallingContextHolder; // 获取当前 Tool Calling 请求上下文。
+import com.agent.toolcalling.context.ToolCallingRequestContext; // 单轮 Tool Calling 上下文。
+import com.agent.toolcalling.project.analysis.CodeAnalysisType; // P5 统一分析类型。
+import com.agent.toolcalling.support.AbstractAiTool; // 仅 analyzeCode 对外继承 AiTool 基类。
+import com.fasterxml.jackson.databind.JsonNode; // 解析内部 Analyzer 结果。
+import com.fasterxml.jackson.databind.node.ArrayNode; // 构造 warnings 数组。
+import com.fasterxml.jackson.databind.node.ObjectNode; // 构造参数 schema 和统一结果。
+import lombok.extern.slf4j.Slf4j; // 记录统一分析分发日志。
+import org.springframework.stereotype.Component; // 注册唯一 P5 对外分析 Tool。
 
-import java.io.IOException;
-import java.nio.charset.MalformedInputException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.LinkOption;
-import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Locale;
-import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-import java.util.stream.Stream;
+import java.util.EnumMap; // 按 CodeAnalysisType 索引内部 Analyzer。
+import java.util.List; // Spring 注入内部 Analyzer 列表。
+import java.util.Locale; // 判断 Tool 文件路径时统一大小写。
+import java.util.Map; // 保存 Analyzer 映射。
 
 /**
- * analyzeCode 项目源码结构分析工具。
+ * analyzeCode 统一项目代码分析工具。
  *
- * <p>本工具只在 project workspace 内读取单个安全代码/文本文件，通过轻量行扫描和正则提取类、字段、方法、
- * Spring 接口和 AI Tool 基础信息。它不做 AST 解析，不修改文件，不接入 RAG、Milvus、向量化或数据库。</p>
+ * <p>适用场景：P5.5.5 架构收敛后，项目代码分析对外只暴露本 Tool。它统一支持单文件结构分析、普通调用链分析、
+ * Controller 到 Service 调用链分析、Tool 到业务组件调用链分析、前后端 SSE 事件链路分析，并通过 analysisType
+ * 分发到内部 Analyzer。</p>
+ *
+ * <p>调用链：ToolRegistry 只注册本 AnalyzeCodeTool -> ToolCallingChatServiceImpl 对所有 P5 分析类请求构造
+ * analyzeCode arguments（必须包含 analysisType）-> execute(arguments) 规范化 path/className/endpoint/toolName/eventName
+ * 等目标参数 -> 分发到 CodeStructureAnalyzer / CallChainAnalyzer / ControllerServiceChainAnalyzer /
+ * ToolServiceChainAnalyzer / SseEventChainAnalyzer -> 包装统一 code_analysis 外层 JSON 返回给 finalAnswer 和 tool_call_log。</p>
+ *
+ * <p>边界说明：本 Tool 只做静态只读分析，不修改项目文件，不访问 workspace 外路径，不接入 RAG/Milvus/向量化，
+ * 不实现 P5.6 代码说明、P5.7 风险分析、P5.8 测试步骤或 P5.9 开发日志保存。</p>
  */
-@Slf4j
-@Component
-public class AnalyzeCodeTool extends AbstractAiTool {
-    private static final String TOOL_NAME = "analyzeCode";
-    private static final String RESULT_TYPE = "code_analysis";
-    private static final int DEFAULT_MAX_ITEMS = 100;
-    private static final int MAX_ALLOWED_ITEMS = 300;
-    private static final int MAX_FILENAME_MATCHES = 20;
-    private static final int MAX_SNIPPET_CHARS = 300;
+@Slf4j // 只记录 analysisType 和相对目标，不打印源码内容。
+@Component // P5 唯一对外代码分析 Tool，ToolRegistry 只暴露 analyzeCode。
+public class AnalyzeCodeTool extends AbstractAiTool { // 统一项目代码分析工具。
+    private static final String TOOL_NAME = "analyzeCode"; // 对外唯一 P5 分析工具名。
+    private static final String RESULT_TYPE = "code_analysis"; // 统一外层结果类型。
+    private static final int DEFAULT_MAX_ITEMS = 100; // 默认最多返回结果数量。
+    private static final int MAX_ALLOWED_ITEMS = 300; // 最大返回结果数量。
+    private static final int DEFAULT_MAX_DEPTH = 1; // 默认分析深度。
+    private static final int MAX_ALLOWED_DEPTH = 2; // 当前 P5.1-P5.5 最大深度。
 
-    private static final Pattern JAVA_PACKAGE_PATTERN = Pattern.compile("^\\s*package\\s+([A-Za-z0-9_.]+)\\s*;");
-    private static final Pattern JAVA_IMPORT_PATTERN = Pattern.compile("^\\s*import\\s+(?:static\\s+)?([^;]+);");
-    private static final Pattern JAVA_CLASS_PATTERN = Pattern.compile("\\b(class|interface|enum|record)\\s+([A-Za-z_$][\\w$]*)(?:\\s+extends\\s+([A-Za-z0-9_$.<>]+))?(?:\\s+implements\\s+([A-Za-z0-9_$.,\\s<>]+))?");
-    private static final Pattern JAVA_FIELD_PATTERN = Pattern.compile("^\\s*(?:(public|protected|private)\\s+)?(?:(?:static|final|transient|volatile)\\s+)*([A-Za-z_$][\\w$<>\\[\\], ?.&]+?)\\s+([A-Za-z_$][\\w$]*)\\s*(?:=.*)?;\\s*$");
-    private static final Pattern JAVA_METHOD_PATTERN = Pattern.compile("^\\s*(?:(public|protected|private)\\s+)?(?:(?:static|final|synchronized|abstract|default|native|strictfp)\\s+)*([A-Za-z_$][\\w$<>\\[\\], ?.&]+?)\\s+([A-Za-z_$][\\w$]*)\\s*\\(([^)]*)\\)\\s*(?:throws\\s+[A-Za-z0-9_$.,\\s<>]+)?\\s*(?:\\{|;)?\\s*$");
-    private static final Pattern TOOL_NAME_PATTERN = Pattern.compile("\\bTOOL_NAME\\s*=\\s*\"([^\"]+)\"");
+    private final Map<CodeAnalysisType, CodeAnalysisHandler> handlerMap; // analysisType 到内部 Analyzer 的映射。
 
-    private static final Pattern PY_IMPORT_PATTERN = Pattern.compile("^\\s*(import\\s+.+|from\\s+.+\\s+import\\s+.+)");
-    private static final Pattern PY_CLASS_PATTERN = Pattern.compile("^\\s*class\\s+([A-Za-z_][\\w]*)(?:\\([^)]*\\))?\\s*:");
-    private static final Pattern PY_FUNCTION_PATTERN = Pattern.compile("^\\s*(async\\s+)?def\\s+([A-Za-z_][\\w]*)\\s*\\(([^)]*)\\)\\s*:");
-
-    private static final Pattern JS_IMPORT_PATTERN = Pattern.compile("^\\s*(import\\s+.+|(?:const|let|var)\\s+.+\\s*=\\s*require\\(.+\\).*)");
-    private static final Pattern JS_CLASS_PATTERN = Pattern.compile("^\\s*(?:export\\s+)?class\\s+([A-Za-z_$][\\w$]*)\\b");
-    private static final Pattern JS_INTERFACE_PATTERN = Pattern.compile("^\\s*(?:export\\s+)?interface\\s+([A-Za-z_$][\\w$]*)\\b");
-    private static final Pattern JS_TYPE_PATTERN = Pattern.compile("^\\s*(?:export\\s+)?type\\s+([A-Za-z_$][\\w$]*)\\s*=");
-    private static final Pattern JS_FUNCTION_PATTERN = Pattern.compile("^\\s*(?:export\\s+)?(?:async\\s+)?function\\s+([A-Za-z_$][\\w$]*)\\s*\\(([^)]*)\\)");
-    private static final Pattern JS_ARROW_PATTERN = Pattern.compile("^\\s*(?:export\\s+)?(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:async\\s*)?(?:\\([^)]*\\)|[A-Za-z_$][\\w$]*)\\s*=>");
-    private static final Pattern JS_FUNCTION_VALUE_PATTERN = Pattern.compile("^\\s*(?:export\\s+)?(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:async\\s+)?function\\b");
-
-    private static final Pattern GO_PACKAGE_PATTERN = Pattern.compile("^\\s*package\\s+([A-Za-z_][\\w]*)");
-    private static final Pattern GO_IMPORT_PATTERN = Pattern.compile("^\\s*import\\s+(?:\\(|\"([^\"]+)\"|`([^`]+)`)");
-    private static final Pattern GO_TYPE_PATTERN = Pattern.compile("^\\s*type\\s+([A-Za-z_][\\w]*)\\s+(struct|interface)\\b");
-    private static final Pattern GO_FUNCTION_PATTERN = Pattern.compile("^\\s*func\\s+(?:\\([^)]*\\)\\s*)?([A-Za-z_][\\w]*)\\s*\\(([^)]*)\\)");
-
-    private static final Pattern SQL_STATEMENT_PATTERN = Pattern.compile("\\b(select|insert\\s+into|update|delete\\s+from|create\\s+table|alter\\s+table)\\b", Pattern.CASE_INSENSITIVE);
-    private static final Pattern SQL_TABLE_PATTERN = Pattern.compile("\\b(?:from|join|into|update|table)\\s+([A-Za-z0-9_.$`\"\\[\\]]+)", Pattern.CASE_INSENSITIVE);
-
-    private final ProjectPathGuard projectPathGuard;
-
-    public AnalyzeCodeTool(ProjectPathGuard projectPathGuard) {
-        this.projectPathGuard = projectPathGuard;
+    public AnalyzeCodeTool(List<CodeAnalysisHandler> handlers) { // Spring 注入所有内部 Analyzer。
+        this.handlerMap = buildHandlerMap(handlers); // 构造只按枚举分发的映射。
     }
 
     @Override
-    public String name() {
-        return TOOL_NAME;
+    public String name() { // ToolRegistry 暴露的工具名。
+        return TOOL_NAME; // 固定 analyzeCode。
     }
 
     @Override
-    public String description() {
-        return "分析 project workspace 内的单个源码文件结构，提取类、注解、字段、方法、Spring 接口和 AI Tool 基础信息。只做轻量行扫描/正则分析，不修改文件，不访问 workspace 外路径。";
+    public String description() { // 给模型看的统一工具描述。
+        return "统一项目代码分析工具。支持单文件结构分析、普通调用链分析、Controller 到 Service 调用链分析、Tool 到业务 Service 调用链分析、前后端 SSE 事件链路分析。根据 analysisType 分发到内部分析器。只做静态只读分析，不修改项目文件。";
     }
 
     @Override
-    public ObjectNode parametersSchema() {
-        ObjectNode schema = createObjectSchema();
-        addProperty(schema, "path", createStringProperty("相对 workspace 的源码文件路径，例如 Tech-Brain-Agent/src/main/java/com/agent/tool/project/SearchCodeTool.java"), true);
-        addProperty(schema, "language", createStringProperty("可选语言名；为空时按文件扩展名自动识别，例如 java、python、typescript、vue、go、sql"), false);
-        ObjectNode includeSnippetProperty = objectMapper.createObjectNode();
-        includeSnippetProperty.put("type", "boolean");
-        includeSnippetProperty.put("description", "是否返回声明行 snippet，可选，默认 true");
-        addProperty(schema, "includeSnippet", includeSnippetProperty, false);
-        addProperty(schema, "maxItems", createIntegerProperty("最多返回的结构项数量，可选，默认 100，最大 300"), false);
-        return schema;
+    public ObjectNode parametersSchema() { // 统一 analyzeCode 参数 schema。
+        ObjectNode schema = createObjectSchema(); // 顶层 object schema，不设置 required。
+        addProperty(schema, "analysisType", createStringProperty("分析类型，可选。STRUCTURE、CALL_CHAIN、CONTROLLER_SERVICE、TOOL_SERVICE、SSE_EVENT_CHAIN、AUTO。默认 AUTO"), false); // 分析类型。
+        addProperty(schema, "path", createStringProperty("可选，项目源码文件 workspace 相对路径"), false); // 文件路径。
+        addProperty(schema, "className", createStringProperty("可选，类名，例如 SearchCodeTool、ChatMessageController"), false); // 类名。
+        addProperty(schema, "methodName", createStringProperty("可选，方法名，例如 execute、sendMessage"), false); // 方法名。
+        addProperty(schema, "endpoint", createStringProperty("可选，接口路径，例如 /chat/message"), false); // 接口路径。
+        addProperty(schema, "toolName", createStringProperty("可选，AI Tool 名称，例如 searchCode、readProjectFile"), false); // Tool 名称。
+        addProperty(schema, "eventName", createStringProperty("可选，SSE 事件名，例如 summary_result、tool_call、done"), false); // SSE 事件。
+        addProperty(schema, "frontendKeyword", createStringProperty("可选，前端关键词，例如 EventSource、fetch、onmessage、addEventListener、TextDecoder"), false); // 前端关键词。
+        addProperty(schema, "maxDepth", createIntegerProperty("分析深度，可选，默认 1，最大 2"), false); // 深度。
+        ObjectNode includeSnippetProperty = objectMapper.createObjectNode(); // boolean 字段手动创建。
+        includeSnippetProperty.put("type", "boolean"); // boolean 类型。
+        includeSnippetProperty.put("description", "是否包含少量代码片段，可选，默认 true"); // 片段说明。
+        addProperty(schema, "includeSnippet", includeSnippetProperty, false); // 片段开关。
+        addProperty(schema, "maxItems", createIntegerProperty("最多返回结果数量，可选，默认 100，最大 300"), false); // 结果上限。
+        return schema; // 返回完整 schema。
     }
 
     @Override
-    public String execute(JsonNode arguments) {
-        String requestedPath = trimToNull(getOptionalText(arguments, "path", null));
-        if (requestedPath == null) {
-            return buildFailureResult("", "path 不能为空。");
+    public String execute(JsonNode arguments) { // 统一分析执行入口。
+        ObjectNode normalizedArguments = normalizeArguments(arguments); // 复制并补齐默认参数。
+        CodeAnalysisType requestedType = CodeAnalysisType.from(getOptionalText(normalizedArguments, "analysisType", "AUTO")); // 解析 analysisType。
+        CodeAnalysisType effectiveType = requestedType == CodeAnalysisType.AUTO
+                ? inferAnalysisType(normalizedArguments)
+                : requestedType; // AUTO 时按参数推断，否则使用显式类型。
+        normalizedArguments.put("analysisType", effectiveType.name()); // 写入最终 analysisType，保证内部和日志一致。
+        applyProjectFileFocusIfNecessary(normalizedArguments); // 没有明确目标时优先使用 recentProjectTarget，再回退 projectFileFocus。
+        normalizeClassNameFallback(normalizedArguments, effectiveType); // 对需要 path 的分析器，用 className 兜底成 path。
+        if (!hasAnyTarget(normalizedArguments)) { // 没有明确目标且没有 projectFileFocus。
+            return buildUnifiedFailureResult(effectiveType, normalizedArguments,
+                    "请指定要分析的类名、文件、接口、Tool 或 SSE 事件。").toString(); // 返回清晰失败。
         }
-        String requestedLanguage = trimToNull(getOptionalText(arguments, "language", null));
-        boolean includeSnippet = resolveIncludeSnippet(arguments);
-        int maxItems = resolveMaxItems(arguments);
+
+        CodeAnalysisHandler handler = handlerMap.get(effectiveType); // 按 analysisType 获取内部 Analyzer。
+        if (handler == null) { // 理论上启动时应注入完整 Analyzer。
+            return buildUnifiedFailureResult(effectiveType, normalizedArguments,
+                    "当前分析类型没有可用内部 Analyzer。").toString(); // 返回失败。
+        }
 
         try {
-            Path filePath = resolveReadableAnalysisFilePath(requestedPath);
-            projectPathGuard.validateReadableCodeFile(filePath);
-            List<String> lines = Files.readAllLines(filePath, StandardCharsets.UTF_8);
-            String fileName = filePath.getFileName() == null ? "" : filePath.getFileName().toString();
-            String extension = projectPathGuard.getExtension(fileName);
-            CodeLanguage registryLanguage = CodeLanguageRegistry.resolveByFileName(fileName);
-            String language = requestedLanguage == null ? registryLanguage.getDisplayName() : requestedLanguage;
-            String languageKey = normalizeLanguageKey(requestedLanguage == null ? registryLanguage.getMarkdownName() : requestedLanguage, extension);
-
-            ObjectNode result = buildBaseSuccessResult(filePath, requestedPath, fileName, extension, language, lines);
-            AnalysisState state = new AnalysisState(maxItems, includeSnippet);
-            analyzeByLanguage(languageKey, extension, lines, result, state);
-            result.put("truncated", state.truncated);
-            return result.toString();
-        } catch (ProjectPathGuard.ProjectPathAccessException e) {
-            log.warn("[AnalyzeCodeTool] access denied, path: {}, reason: {}", safeRelativePath(requestedPath), e.getMessage());
-            return buildFailureResult(requestedPath, normalizeFailureMessage(e.getMessage()));
-        } catch (MalformedInputException e) {
-            log.warn("[AnalyzeCodeTool] non utf8 file, path: {}", safeRelativePath(requestedPath));
-            return buildFailureResult(requestedPath, "文件编码暂不支持，请确认文件为 UTF-8 文本。");
-        } catch (IOException e) {
-            log.warn("[AnalyzeCodeTool] read failed, path: {}, reason: {}", safeRelativePath(requestedPath), e.getMessage());
-            return buildFailureResult(requestedPath, "读取文件失败，请稍后重试。");
+            log.info("[AnalyzeCodeTool] dispatch analysisType: {}, target: {}", effectiveType, previewTarget(normalizedArguments)); // 只打印轻量目标。
+            String innerResultJson = handler.analyze(normalizedArguments); // 执行内部 Analyzer。
+            JsonNode innerResult = objectMapper.readTree(innerResultJson == null || innerResultJson.isBlank() ? "{}" : innerResultJson); // 解析内部结果。
+            return buildUnifiedResult(effectiveType, normalizedArguments, innerResult).toString(); // 包装统一外层。
         } catch (Exception e) {
-            log.error("[AnalyzeCodeTool] analyze failed, path: {}", safeRelativePath(requestedPath), e);
-            return buildFailureResult(requestedPath, "代码结构分析失败，请稍后重试。");
+            log.error("[AnalyzeCodeTool] analyze dispatch failed, analysisType: {}", effectiveType, e); // 保留堆栈供排查。
+            return buildUnifiedFailureResult(effectiveType, normalizedArguments, "代码分析失败，请稍后重试。").toString(); // 统一兜底失败。
         }
     }
 
-    private Path resolveReadableAnalysisFilePath(String requestedPath) {
-        Path directPath = projectPathGuard.resolveProjectPath(requestedPath);
-        if (Files.exists(directPath, LinkOption.NOFOLLOW_LINKS) || !isFilenameOnly(requestedPath)) {
-            return directPath;
+    private Map<CodeAnalysisType, CodeAnalysisHandler> buildHandlerMap(List<CodeAnalysisHandler> handlers) { // 构建内部 Analyzer 映射。
+        Map<CodeAnalysisType, CodeAnalysisHandler> map = new EnumMap<>(CodeAnalysisType.class); // 使用枚举 Map。
+        if (handlers == null) { // 没有注入任何 Analyzer。
+            return map; // 返回空映射，执行时会给出明确错误。
         }
-
-        String fileName = normalizeFileNameCandidate(requestedPath);
-        String extension = projectPathGuard.getExtension(fileName);
-        if (projectPathGuard.isBlockedFilename(fileName) || projectPathGuard.isBlockedExtension(extension)) {
-            throw new ProjectPathGuard.ProjectPathAccessException("该文件属于敏感文件，禁止读取。");
-        }
-        if (!extension.isEmpty() && !projectPathGuard.isAllowedExtension(extension)) {
-            throw new ProjectPathGuard.ProjectPathAccessException("不支持读取该文件类型。");
-        }
-        List<Path> matches = findProjectFilesByName(fileName);
-        if (matches.isEmpty()) {
-            throw new ProjectPathGuard.ProjectPathAccessException("未在 workspace 中找到 " + fileName + "，请先使用 searchCode 定位文件位置或提供完整相对路径。");
-        }
-        if (matches.size() > 1) {
-            throw new ProjectPathGuard.ProjectPathAccessException(buildAmbiguousFileMessage(fileName, matches));
-        }
-        return matches.get(0);
-    }
-
-    private String normalizeFileNameCandidate(String requestedPath) {
-        String fileName = trimToNull(requestedPath);
-        if (fileName == null) {
-            return "";
-        }
-        if (projectPathGuard.isBlockedFilename(fileName)) {
-            return fileName;
-        }
-        if (!fileName.contains(".") && fileName.matches("[A-Za-z_$][A-Za-z0-9_$]*")) {
-            return fileName + ".java";
-        }
-        return fileName;
-    }
-
-    private List<Path> findProjectFilesByName(String fileName) {
-        List<Path> matches = new ArrayList<>();
-        String normalizedFileName = trimToNull(fileName);
-        if (normalizedFileName == null) {
-            return matches;
-        }
-        Path workspaceRoot = projectPathGuard.getWorkspaceRoot();
-        if (!Files.isDirectory(workspaceRoot, LinkOption.NOFOLLOW_LINKS)) {
-            return matches;
-        }
-        collectProjectFilesByName(workspaceRoot, normalizedFileName, matches);
-        matches.sort(Comparator.comparing(path -> toWorkspaceRelativePath(path, ""), String.CASE_INSENSITIVE_ORDER));
-        return matches;
-    }
-
-    private void collectProjectFilesByName(Path directory, String fileName, List<Path> matches) {
-        if (matches.size() >= MAX_FILENAME_MATCHES || !isSafeDirectory(directory)) {
-            return;
-        }
-        try (Stream<Path> stream = Files.list(directory)) {
-            List<Path> children = stream
-                    .sorted(Comparator.comparing(path -> path.getFileName() == null ? "" : path.getFileName().toString(), String.CASE_INSENSITIVE_ORDER))
-                    .toList();
-            for (Path child : children) {
-                if (matches.size() >= MAX_FILENAME_MATCHES) {
-                    return;
-                }
-                if (Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS)) {
-                    collectProjectFilesByName(child, fileName, matches);
-                    continue;
-                }
-                if (isSafeFileNameMatch(child, fileName)) {
-                    matches.add(child.toAbsolutePath().normalize());
-                }
-            }
-        } catch (IOException e) {
-            log.debug("[AnalyzeCodeTool] skip unreadable directory while resolving file name");
-        }
-    }
-
-    private boolean isSafeDirectory(Path directory) {
-        if (directory == null) {
-            return false;
-        }
-        Path normalizedPath = directory.toAbsolutePath().normalize();
-        return projectPathGuard.isInsideWorkspace(normalizedPath)
-                && !Files.isSymbolicLink(normalizedPath)
-                && !projectPathGuard.isSensitivePath(normalizedPath)
-                && Files.isDirectory(normalizedPath, LinkOption.NOFOLLOW_LINKS);
-    }
-
-    private boolean isSafeFileNameMatch(Path filePath, String fileName) {
-        if (filePath == null || filePath.getFileName() == null) {
-            return false;
-        }
-        Path normalizedPath = filePath.toAbsolutePath().normalize();
-        String candidateName = filePath.getFileName().toString();
-        String extension = projectPathGuard.getExtension(candidateName);
-        return candidateName.equalsIgnoreCase(fileName)
-                && projectPathGuard.isInsideWorkspace(normalizedPath)
-                && !Files.isSymbolicLink(normalizedPath)
-                && !projectPathGuard.isSensitivePath(normalizedPath)
-                && !projectPathGuard.isBlockedFilename(candidateName)
-                && !projectPathGuard.isBlockedExtension(extension)
-                && projectPathGuard.isAllowedExtension(extension)
-                && Files.isRegularFile(normalizedPath, LinkOption.NOFOLLOW_LINKS);
-    }
-
-    private String buildAmbiguousFileMessage(String fileName, List<Path> matches) {
-        StringBuilder builder = new StringBuilder("找到多个 ").append(fileName).append("，请指定要分析哪一个：");
-        int index = 1;
-        for (Path match : matches) {
-            builder.append('\n').append(index++).append(". ").append(toWorkspaceRelativePath(match, ""));
-        }
-        return builder.toString();
-    }
-
-    private boolean isFilenameOnly(String path) {
-        String normalizedPath = trimToNull(path);
-        if (normalizedPath == null) {
-            return false;
-        }
-        return !normalizedPath.contains("/") && !normalizedPath.contains("\\");
-    }
-
-    private ObjectNode buildBaseSuccessResult(Path filePath,
-                                              String requestedPath,
-                                              String fileName,
-                                              String extension,
-                                              String language,
-                                              List<String> lines) throws IOException {
-        ObjectNode result = objectMapper.createObjectNode();
-        result.put("type", RESULT_TYPE);
-        result.put("success", true);
-        result.put("path", toWorkspaceRelativePath(filePath, requestedPath));
-        result.put("fileName", fileName);
-        result.put("extension", extension);
-        result.put("language", language);
-        result.put("lineCount", lines == null ? 0 : lines.size());
-        result.put("fileSize", Files.size(filePath));
-        result.putNull("packageName");
-        result.set("imports", objectMapper.createArrayNode());
-        result.set("classInfo", objectMapper.createObjectNode());
-        result.set("fields", objectMapper.createArrayNode());
-        result.set("methods", objectMapper.createArrayNode());
-        result.set("springEndpoints", objectMapper.createArrayNode());
-        result.set("aiToolInfo", objectMapper.createObjectNode());
-        result.set("basicSymbols", objectMapper.createArrayNode());
-        return result;
-    }
-
-    private void analyzeByLanguage(String languageKey,
-                                   String extension,
-                                   List<String> lines,
-                                   ObjectNode result,
-                                   AnalysisState state) {
-        if ("java".equals(languageKey) || "java".equals(extension)) {
-            analyzeJava(lines, result, state);
-            return;
-        }
-        if ("python".equals(languageKey) || "py".equals(extension)) {
-            analyzePython(lines, result, state);
-            return;
-        }
-        if ("javascript".equals(languageKey) || "typescript".equals(languageKey)
-                || "js".equals(extension) || "jsx".equals(extension) || "ts".equals(extension) || "tsx".equals(extension)) {
-            analyzeJavaScriptLike(lines, result, state);
-            return;
-        }
-        if ("vue".equals(languageKey) || "vue".equals(extension)) {
-            analyzeVue(lines, result, state);
-            return;
-        }
-        if ("go".equals(languageKey) || "go".equals(extension)) {
-            analyzeGo(lines, result, state);
-            return;
-        }
-        if ("sql".equals(languageKey) || "sql".equals(extension)) {
-            analyzeSql(lines, result, state);
-            return;
-        }
-        analyzeBasic(lines, result, state);
-    }
-
-    private void analyzeJava(List<String> lines, ObjectNode result, AnalysisState state) {
-        ArrayNode imports = result.withArray("imports");
-        ArrayNode fields = result.withArray("fields");
-        ArrayNode methods = result.withArray("methods");
-        ArrayNode endpoints = result.withArray("springEndpoints");
-        List<String> pendingAnnotations = new ArrayList<>();
-        List<String> allLines = lines == null ? List.of() : lines;
-        String allContent = String.join("\n", allLines);
-        ObjectNode classInfo = objectMapper.createObjectNode();
-        String classBasePath = "";
-        boolean controllerClass = false;
-        int braceDepth = 0;
-
-        for (int index = 0; index < allLines.size(); index++) {
-            String line = allLines.get(index);
-            String trimmed = line.trim();
-            int lineNumber = index + 1;
-
-            Matcher packageMatcher = JAVA_PACKAGE_PATTERN.matcher(line);
-            if (packageMatcher.find()) {
-                result.put("packageName", packageMatcher.group(1));
-            }
-            Matcher importMatcher = JAVA_IMPORT_PATTERN.matcher(line);
-            if (importMatcher.find()) {
-                imports.add(importMatcher.group(1));
-            }
-
-            if (trimmed.startsWith("@") && braceDepth <= 1) {
-                pendingAnnotations.add(trimmed);
-                braceDepth += braceDelta(line);
-                continue;
-            }
-
-            Matcher classMatcher = JAVA_CLASS_PATTERN.matcher(line);
-            if (classInfo.isEmpty() && classMatcher.find()) {
-                classInfo = buildJavaClassInfo(classMatcher, pendingAnnotations, lineNumber);
-                result.set("classInfo", classInfo);
-                controllerClass = hasAnnotation(pendingAnnotations, "RestController") || hasAnnotation(pendingAnnotations, "Controller");
-                classBasePath = firstMappingPath(pendingAnnotations, "@RequestMapping");
-                pendingAnnotations.clear();
-                braceDepth += braceDelta(line);
-                continue;
-            }
-
-            if (braceDepth <= 1 && !pendingAnnotations.isEmpty()) {
-                Matcher methodMatcher = JAVA_METHOD_PATTERN.matcher(line);
-                if (methodMatcher.matches() && isJavaMethodLine(trimmed, methodMatcher)) {
-                    ObjectNode method = buildJavaMethod(methodMatcher, pendingAnnotations, lineNumber, line, state.includeSnippet);
-                    addLimited(methods, method, state);
-                    addSpringEndpointsIfNeeded(controllerClass, classBasePath, pendingAnnotations, methodMatcher.group(3),
-                            lineNumber, endpoints, state);
-                    pendingAnnotations.clear();
-                    braceDepth += braceDelta(line);
-                    continue;
-                }
-            }
-
-            if (braceDepth <= 1) {
-                Matcher methodMatcher = JAVA_METHOD_PATTERN.matcher(line);
-                if (methodMatcher.matches() && isJavaMethodLine(trimmed, methodMatcher)) {
-                    ObjectNode method = buildJavaMethod(methodMatcher, pendingAnnotations, lineNumber, line, state.includeSnippet);
-                    addLimited(methods, method, state);
-                    addSpringEndpointsIfNeeded(controllerClass, classBasePath, pendingAnnotations, methodMatcher.group(3),
-                            lineNumber, endpoints, state);
-                    pendingAnnotations.clear();
-                    braceDepth += braceDelta(line);
-                    continue;
-                }
-
-                Matcher fieldMatcher = JAVA_FIELD_PATTERN.matcher(line);
-                if (fieldMatcher.matches() && isJavaFieldLine(trimmed)) {
-                    ObjectNode field = buildJavaField(fieldMatcher, pendingAnnotations, lineNumber, line, state.includeSnippet);
-                    addLimited(fields, field, state);
-                    pendingAnnotations.clear();
-                    braceDepth += braceDelta(line);
-                    continue;
-                }
-            }
-
-            if (!trimmed.isBlank() && !trimmed.startsWith("//") && !trimmed.startsWith("*")) {
-                pendingAnnotations.clear();
-            }
-            braceDepth += braceDelta(line);
-        }
-
-        result.set("aiToolInfo", buildAiToolInfo(allContent, classInfo));
-    }
-
-    private ObjectNode buildJavaClassInfo(Matcher classMatcher, List<String> annotations, int lineNumber) {
-        ObjectNode node = objectMapper.createObjectNode();
-        String type = classMatcher.group(1) == null ? "CLASS" : classMatcher.group(1).toUpperCase(Locale.ROOT);
-        node.put("name", safeText(classMatcher.group(2)));
-        node.put("type", type);
-        node.set("annotations", toArrayNode(annotations));
-        node.put("extendsClass", safeText(classMatcher.group(3)));
-        node.set("implementsInterfaces", splitToArrayNode(classMatcher.group(4)));
-        node.put("lineNumber", lineNumber);
-        return node;
-    }
-
-    private ObjectNode buildJavaField(Matcher fieldMatcher,
-                                      List<String> annotations,
-                                      int lineNumber,
-                                      String line,
-                                      boolean includeSnippet) {
-        ObjectNode node = objectMapper.createObjectNode();
-        node.put("name", safeText(fieldMatcher.group(3)));
-        node.put("type", compactSpaces(fieldMatcher.group(2)));
-        node.put("visibility", visibility(fieldMatcher.group(1)));
-        node.set("annotations", toArrayNode(annotations));
-        node.put("lineNumber", lineNumber);
-        putSnippetIfNeeded(node, line, includeSnippet);
-        return node;
-    }
-
-    private ObjectNode buildJavaMethod(Matcher methodMatcher,
-                                       List<String> annotations,
-                                       int lineNumber,
-                                       String line,
-                                       boolean includeSnippet) {
-        ObjectNode node = objectMapper.createObjectNode();
-        node.put("name", safeText(methodMatcher.group(3)));
-        node.put("returnType", compactSpaces(methodMatcher.group(2)));
-        node.put("visibility", visibility(methodMatcher.group(1)));
-        node.put("parameters", compactSpaces(methodMatcher.group(4)));
-        node.set("annotations", toArrayNode(annotations));
-        node.put("lineNumber", lineNumber);
-        putSnippetIfNeeded(node, line, includeSnippet);
-        return node;
-    }
-
-    private void addSpringEndpointsIfNeeded(boolean controllerClass,
-                                            String classBasePath,
-                                            List<String> annotations,
-                                            String methodName,
-                                            int lineNumber,
-                                            ArrayNode endpoints,
-                                            AnalysisState state) {
-        if (!controllerClass || annotations == null || annotations.isEmpty()) {
-            return;
-        }
-        for (String annotation : annotations) {
-            String mappingAnnotation = mappingAnnotationName(annotation);
-            if (mappingAnnotation == null) {
-                continue;
-            }
-            ObjectNode endpoint = objectMapper.createObjectNode();
-            endpoint.put("httpMethod", httpMethodFromMappingAnnotation(annotation, mappingAnnotation));
-            endpoint.put("path", joinPaths(classBasePath, extractAnnotationPath(annotation)));
-            endpoint.put("methodName", safeText(methodName));
-            endpoint.put("lineNumber", lineNumber);
-            endpoint.put("mappingAnnotation", mappingAnnotation);
-            addLimited(endpoints, endpoint, state);
-        }
-    }
-
-    private ObjectNode buildAiToolInfo(String content, ObjectNode classInfo) {
-        ObjectNode node = objectMapper.createObjectNode();
-        Matcher toolNameMatcher = TOOL_NAME_PATTERN.matcher(content == null ? "" : content);
-        String toolName = toolNameMatcher.find() ? toolNameMatcher.group(1) : "";
-        boolean extendsAbstractAiTool = contains(content, "extends AbstractAiTool");
-        boolean implementsAiTool = contains(content, "implements AiTool");
-        boolean hasExecuteMethod = Pattern.compile("\\bexecute\\s*\\(\\s*JsonNode\\b").matcher(content == null ? "" : content).find();
-        boolean hasParametersSchema = contains(content, "parametersSchema(");
-        boolean hasDescription = contains(content, "description()");
-        boolean isAiTool = !toolName.isBlank() || extendsAbstractAiTool || implementsAiTool || hasExecuteMethod || hasParametersSchema;
-
-        node.put("isAiTool", isAiTool);
-        node.put("toolName", toolName);
-        node.put("extendsAbstractAiTool", extendsAbstractAiTool);
-        node.put("implementsAiTool", implementsAiTool);
-        node.put("hasExecuteMethod", hasExecuteMethod);
-        node.put("hasParametersSchema", hasParametersSchema);
-        node.put("hasDescription", hasDescription);
-        if (classInfo != null && classInfo.hasNonNull("name")) {
-            node.put("className", classInfo.path("name").asText(""));
-        }
-        return node;
-    }
-
-    private void analyzePython(List<String> lines, ObjectNode result, AnalysisState state) {
-        ArrayNode imports = result.withArray("imports");
-        ArrayNode symbols = result.withArray("basicSymbols");
-        List<String> decorators = new ArrayList<>();
-        List<String> safeLines = lines == null ? List.of() : lines;
-        for (int index = 0; index < safeLines.size(); index++) {
-            String line = safeLines.get(index);
-            String trimmed = line.trim();
-            int lineNumber = index + 1;
-            Matcher importMatcher = PY_IMPORT_PATTERN.matcher(line);
-            if (importMatcher.matches()) {
-                imports.add(trimmed);
-            }
-            if (trimmed.startsWith("@")) {
-                decorators.add(trimmed);
-                continue;
-            }
-            Matcher classMatcher = PY_CLASS_PATTERN.matcher(line);
-            if (classMatcher.matches()) {
-                addLimited(symbols, buildSymbol("CLASS", classMatcher.group(1), decorators, lineNumber, line, state.includeSnippet), state);
-                decorators.clear();
-                continue;
-            }
-            Matcher functionMatcher = PY_FUNCTION_PATTERN.matcher(line);
-            if (functionMatcher.matches()) {
-                String kind = functionMatcher.group(1) == null ? "FUNCTION" : "ASYNC_FUNCTION";
-                ObjectNode symbol = buildSymbol(kind, functionMatcher.group(2), decorators, lineNumber, line, state.includeSnippet);
-                symbol.put("parameters", compactSpaces(functionMatcher.group(3)));
-                addLimited(symbols, symbol, state);
-                decorators.clear();
-                continue;
-            }
-            if (!trimmed.isBlank() && !trimmed.startsWith("#")) {
-                decorators.clear();
+        for (CodeAnalysisHandler handler : handlers) { // 遍历 Spring Bean。
+            if (handler != null && handler.analysisType() != null && handler.analysisType() != CodeAnalysisType.AUTO) { // AUTO 不作为真实处理器。
+                map.put(handler.analysisType(), handler); // 同类覆盖由 Spring 配置保证唯一，后续可加启动校验。
             }
         }
+        return map; // 返回映射。
     }
 
-    private void analyzeJavaScriptLike(List<String> lines, ObjectNode result, AnalysisState state) {
-        ArrayNode imports = result.withArray("imports");
-        ArrayNode symbols = result.withArray("basicSymbols");
-        List<String> safeLines = lines == null ? List.of() : lines;
-        for (int index = 0; index < safeLines.size(); index++) {
-            String line = safeLines.get(index);
-            String trimmed = line.trim();
-            int lineNumber = index + 1;
-            Matcher importMatcher = JS_IMPORT_PATTERN.matcher(line);
-            if (importMatcher.matches()) {
-                imports.add(trimmed);
-            }
-            addJsSymbolIfMatches(symbols, state, line, lineNumber, JS_CLASS_PATTERN, "CLASS");
-            addJsSymbolIfMatches(symbols, state, line, lineNumber, JS_INTERFACE_PATTERN, "INTERFACE");
-            addJsSymbolIfMatches(symbols, state, line, lineNumber, JS_TYPE_PATTERN, "TYPE");
-            addJsSymbolIfMatches(symbols, state, line, lineNumber, JS_FUNCTION_PATTERN, trimmed.startsWith("async ") ? "ASYNC_FUNCTION" : "FUNCTION");
-            addJsSymbolIfMatches(symbols, state, line, lineNumber, JS_ARROW_PATTERN, "ARROW_FUNCTION");
-            addJsSymbolIfMatches(symbols, state, line, lineNumber, JS_FUNCTION_VALUE_PATTERN, "FUNCTION_VALUE");
-            if (trimmed.startsWith("export default")) {
-                addLimited(symbols, buildSymbol("EXPORT_DEFAULT", "default", List.of(), lineNumber, line, state.includeSnippet), state);
-            }
+    private ObjectNode normalizeArguments(JsonNode arguments) { // 复制 arguments 并补齐通用默认参数。
+        ObjectNode normalized = arguments instanceof ObjectNode objectNode
+                ? objectNode.deepCopy()
+                : objectMapper.createObjectNode(); // 只接受 object，非 object 按空参数。
+        if (!normalized.hasNonNull("maxDepth")) { // 缺少深度时默认 1。
+            normalized.put("maxDepth", DEFAULT_MAX_DEPTH); // 写入默认深度。
+        } else {
+            normalized.put("maxDepth", clamp(normalized.path("maxDepth").asInt(DEFAULT_MAX_DEPTH), DEFAULT_MAX_DEPTH, MAX_ALLOWED_DEPTH)); // 限制深度。
+        }
+        if (!normalized.hasNonNull("maxItems")) { // 缺少数量上限。
+            normalized.put("maxItems", DEFAULT_MAX_ITEMS); // 写入默认上限。
+        } else {
+            normalized.put("maxItems", clamp(normalized.path("maxItems").asInt(DEFAULT_MAX_ITEMS), 1, MAX_ALLOWED_ITEMS)); // 限制上限。
+        }
+        if (!normalized.hasNonNull("includeSnippet")) { // 缺少片段开关。
+            normalized.put("includeSnippet", true); // 默认带少量片段。
+        }
+        return normalized; // 返回规范化参数。
+    }
+
+    private CodeAnalysisType inferAnalysisType(ObjectNode arguments) { // AUTO 模式下按参数推断分析类型。
+        if (hasText(arguments, "eventName") || hasText(arguments, "frontendKeyword")) { // SSE 事件或前端关键词最明确。
+            return CodeAnalysisType.SSE_EVENT_CHAIN; // SSE 链路分析。
+        }
+        if (hasText(arguments, "endpoint")) { // 只有 endpoint 时默认后端 Controller→Service。
+            return CodeAnalysisType.CONTROLLER_SERVICE; // Controller 专项。
+        }
+        if (hasText(arguments, "toolName")) { // 明确 toolName 时分析 Tool→Service。
+            return CodeAnalysisType.TOOL_SERVICE; // Tool 专项。
+        }
+        if (hasText(arguments, "methodName")) { // 只有方法名通常是调用链。
+            return CodeAnalysisType.CALL_CHAIN; // 普通调用链。
+        }
+        String pathOrClass = firstText(arguments, "path", "className"); // 读取 path 或 className。
+        if (looksLikeToolTarget(pathOrClass)) { // 明确 Tool 类/文件但未指定类型时默认结构分析，避免把“有哪些方法”误转专项。
+            return CodeAnalysisType.STRUCTURE; // 单文件结构。
+        }
+        return CodeAnalysisType.STRUCTURE; // 只有 path/className 时默认结构分析。
+    }
+
+    private void applyProjectFileFocusIfNecessary(ObjectNode arguments) { // 没有明确目标时才允许使用 recentProjectTarget/projectFileFocus。
+        if (hasAnyTarget(arguments)) { // 已有明确目标。
+            return; // 不被 focus 锁死。
+        }
+        ToolCallingRequestContext context = ToolCallingContextHolder.get(); // 读取当前请求上下文。
+        ConversationFocusContext recentTarget = context == null ? null : context.getRecentProjectTarget(); // 读取最近明确项目目标。
+        if (recentTarget != null && recentTarget.getPath() != null && !recentTarget.getPath().isBlank()) { // 有最近明确项目目标。
+            arguments.put("path", recentTarget.getPath()); // 只写入相对 workspace 路径，不保存内容。
+            arguments.put("targetSource", "recentProjectTarget"); // 标记来源，便于 tool_call_log route_reason 排查。
+            return; // recentProjectTarget 优先于 projectFileFocus。
+        }
+        ConversationFocusContext focus = context == null ? null : context.getProjectFileFocus(); // 读取项目文件焦点。
+        if (focus != null && focus.getPath() != null && !focus.getPath().isBlank()) { // 有有效 projectFileFocus。
+            arguments.put("path", focus.getPath()); // 只写入相对 workspace 路径，不保存内容。
+            arguments.put("targetSource", "projectFileFocus"); // 标记来源，便于路由日志排查。
         }
     }
 
-    private void addJsSymbolIfMatches(ArrayNode symbols,
-                                      AnalysisState state,
-                                      String line,
-                                      int lineNumber,
-                                      Pattern pattern,
-                                      String kind) {
-        Matcher matcher = pattern.matcher(line);
-        if (matcher.find()) {
-            addLimited(symbols, buildSymbol(kind, matcher.group(1), List.of(), lineNumber, line, state.includeSnippet), state);
+    private void normalizeClassNameFallback(ObjectNode arguments, CodeAnalysisType analysisType) { // 将 className 转成旧分析器可理解的 path 兜底。
+        if (hasText(arguments, "path") || !hasText(arguments, "className")) { // path 已存在或没有 className。
+            return; // 不处理。
+        }
+        if (analysisType == CodeAnalysisType.STRUCTURE
+                || analysisType == CodeAnalysisType.CALL_CHAIN
+                || analysisType == CodeAnalysisType.CONTROLLER_SERVICE) { // 这些旧分析器通过 path 字段支持类名唯一定位。
+            arguments.put("path", arguments.path("className").asText()); // className 作为文件名/类名传给内部解析器。
         }
     }
 
-    private void analyzeVue(List<String> lines, ObjectNode result, AnalysisState state) {
-        analyzeJavaScriptLike(lines, result, state);
-        List<String> safeLines = lines == null ? List.of() : lines;
-        ObjectNode vueInfo = objectMapper.createObjectNode();
-        vueInfo.put("hasTemplate", containsLine(safeLines, "<template"));
-        vueInfo.put("hasScript", containsLine(safeLines, "<script"));
-        vueInfo.put("hasStyle", containsLine(safeLines, "<style"));
-        vueInfo.put("hasDefineComponent", containsLine(safeLines, "defineComponent"));
-        vueInfo.put("hasSetup", containsLine(safeLines, "setup(") || containsLine(safeLines, "<script setup"));
-        result.set("vueInfo", vueInfo);
+    private ObjectNode buildUnifiedResult(CodeAnalysisType analysisType, ObjectNode arguments, JsonNode innerResult) { // 包装统一外层结果。
+        ObjectNode result = objectMapper.createObjectNode(); // 创建外层对象。
+        boolean success = innerResult.path("success").asBoolean(false); // 继承内部成功状态。
+        result.put("type", RESULT_TYPE); // 统一外层 type。
+        result.put("success", success); // 统一成功状态。
+        result.put("analysisType", analysisType.name()); // 写入分析类型。
+        result.set("target", buildTarget(arguments, innerResult)); // 写入目标信息。
+        result.set("result", innerResult); // 保留内部 Analyzer 原结果。
+        copyFocusFields(result, innerResult); // 复制 path/fileName/language 等字段，兼容 projectFileFocus 逻辑。
+        if (!success) { // 失败时透传内部失败消息。
+            result.put("message", innerResult.path("message").asText("未找到真实匹配目标，无法分析。")); // 失败原因。
+        }
+        ArrayNode warnings = objectMapper.createArrayNode(); // 统一 warnings。
+        if (innerResult.has("warnings") && innerResult.path("warnings").isArray()) { // 内部已有 warnings。
+            innerResult.path("warnings").forEach(warnings::add); // 复制内部 warnings。
+        }
+        result.set("warnings", warnings); // 写入 warnings 数组。
+        return result; // 返回统一外层。
     }
 
-    private void analyzeGo(List<String> lines, ObjectNode result, AnalysisState state) {
-        ArrayNode imports = result.withArray("imports");
-        ArrayNode symbols = result.withArray("basicSymbols");
-        boolean inImportBlock = false;
-        List<String> safeLines = lines == null ? List.of() : lines;
-        for (int index = 0; index < safeLines.size(); index++) {
-            String line = safeLines.get(index);
-            String trimmed = line.trim();
-            int lineNumber = index + 1;
-            Matcher packageMatcher = GO_PACKAGE_PATTERN.matcher(line);
-            if (packageMatcher.matches()) {
-                result.put("packageName", packageMatcher.group(1));
-            }
-            Matcher importMatcher = GO_IMPORT_PATTERN.matcher(line);
-            if (importMatcher.find()) {
-                inImportBlock = trimmed.endsWith("(");
-                String directImport = importMatcher.group(1) != null ? importMatcher.group(1) : importMatcher.group(2);
-                if (directImport != null) {
-                    imports.add(directImport);
-                }
-                continue;
-            }
-            if (inImportBlock) {
-                if (trimmed.startsWith(")")) {
-                    inImportBlock = false;
-                } else if (trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
-                    imports.add(trimmed.substring(1, trimmed.length() - 1));
-                }
-            }
-            Matcher typeMatcher = GO_TYPE_PATTERN.matcher(line);
-            if (typeMatcher.matches()) {
-                addLimited(symbols, buildSymbol(typeMatcher.group(2).toUpperCase(Locale.ROOT), typeMatcher.group(1), List.of(), lineNumber, line, state.includeSnippet), state);
-            }
-            Matcher functionMatcher = GO_FUNCTION_PATTERN.matcher(line);
-            if (functionMatcher.matches()) {
-                ObjectNode symbol = buildSymbol("FUNCTION", functionMatcher.group(1), List.of(), lineNumber, line, state.includeSnippet);
-                symbol.put("parameters", compactSpaces(functionMatcher.group(2)));
-                addLimited(symbols, symbol, state);
-            }
+    private ObjectNode buildUnifiedFailureResult(CodeAnalysisType analysisType, ObjectNode arguments, String message) { // 构造 analyzeCode 外层失败结果。
+        ObjectNode result = objectMapper.createObjectNode(); // 创建结果。
+        result.put("type", RESULT_TYPE); // 外层 type。
+        result.put("success", false); // 标记失败。
+        result.put("analysisType", analysisType == null ? CodeAnalysisType.AUTO.name() : analysisType.name()); // 写入类型。
+        result.set("target", buildTarget(arguments, objectMapper.createObjectNode())); // 写入已知目标。
+        result.put("message", message); // 失败原因。
+        result.set("warnings", objectMapper.createArrayNode()); // 空 warnings。
+        return result; // 返回失败。
+    }
+
+    private ObjectNode buildTarget(ObjectNode arguments, JsonNode innerResult) { // 构造统一 target。
+        ObjectNode target = objectMapper.createObjectNode(); // 创建 target。
+        putIfText(target, "path", firstText(arguments, innerResult, "path")); // path。
+        putIfText(target, "className", firstText(arguments, innerResult, "className")); // className。
+        putIfText(target, "methodName", firstText(arguments, innerResult, "methodName")); // methodName。
+        putIfText(target, "endpoint", firstText(arguments, innerResult, "endpoint")); // endpoint。
+        putIfText(target, "toolName", firstText(arguments, innerResult, "toolName")); // toolName。
+        putIfText(target, "eventName", firstText(arguments, innerResult, "eventName")); // eventName。
+        putIfText(target, "frontendKeyword", firstText(arguments, innerResult, "frontendKeyword")); // frontendKeyword。
+        return target; // 返回 target。
+    }
+
+    private void copyFocusFields(ObjectNode result, JsonNode innerResult) { // 复制焦点保存需要的常用字段。
+        copyText(result, innerResult, "path"); // workspace 相对路径。
+        copyText(result, innerResult, "fileName"); // 文件名。
+        copyText(result, innerResult, "extension"); // 扩展名。
+        copyText(result, innerResult, "language"); // 语言展示名。
+        if (innerResult.has("fileSize")) { // 文件大小存在。
+            result.set("fileSize", innerResult.get("fileSize")); // 复制文件大小。
+        }
+        if (innerResult.has("truncated")) { // 截断状态存在。
+            result.set("truncated", innerResult.get("truncated")); // 复制截断状态。
         }
     }
 
-    private void analyzeSql(List<String> lines, ObjectNode result, AnalysisState state) {
-        ArrayNode symbols = result.withArray("basicSymbols");
-        Set<String> tableNames = new LinkedHashSet<>();
-        List<String> safeLines = lines == null ? List.of() : lines;
-        for (int index = 0; index < safeLines.size(); index++) {
-            String line = safeLines.get(index);
-            Matcher statementMatcher = SQL_STATEMENT_PATTERN.matcher(line);
-            if (statementMatcher.find()) {
-                String statement = compactSpaces(statementMatcher.group(1)).toUpperCase(Locale.ROOT);
-                addLimited(symbols, buildSymbol("SQL_STATEMENT", statement, List.of(), index + 1, line, state.includeSnippet), state);
-            }
-            Matcher tableMatcher = SQL_TABLE_PATTERN.matcher(line);
-            while (tableMatcher.find()) {
-                tableNames.add(cleanSqlTableName(tableMatcher.group(1)));
-            }
-        }
-        ArrayNode tables = objectMapper.createArrayNode();
-        tableNames.forEach(tables::add);
-        result.set("tables", tables);
+    private boolean hasAnyTarget(ObjectNode arguments) { // 判断是否存在任一分析目标。
+        return hasText(arguments, "path")
+                || hasText(arguments, "className")
+                || hasText(arguments, "methodName")
+                || hasText(arguments, "endpoint")
+                || hasText(arguments, "toolName")
+                || hasText(arguments, "eventName")
+                || hasText(arguments, "frontendKeyword"); // 任一目标字段非空即可执行。
     }
 
-    private void analyzeBasic(List<String> lines, ObjectNode result, AnalysisState state) {
-        ArrayNode imports = result.withArray("imports");
-        ArrayNode symbols = result.withArray("basicSymbols");
-        List<String> safeLines = lines == null ? List.of() : lines;
-        for (int index = 0; index < safeLines.size(); index++) {
-            String line = safeLines.get(index);
-            String trimmed = line.trim();
-            if (trimmed.startsWith("import ") || trimmed.startsWith("using ")
-                    || trimmed.startsWith("#include") || trimmed.startsWith("use ")
-                    || trimmed.contains("require(")) {
-                imports.add(trimmed);
-            }
-            if (looksLikeBasicSymbol(trimmed)) {
-                addLimited(symbols, buildSymbol("SYMBOL", firstSymbolName(trimmed), List.of(), index + 1, line, state.includeSnippet), state);
-            }
-        }
+    private boolean hasText(ObjectNode arguments, String fieldName) { // 判断字段是否为非空文本。
+        return arguments != null && arguments.hasNonNull(fieldName) && !arguments.path(fieldName).asText("").isBlank(); // 非空白。
     }
 
-    private ObjectNode buildSymbol(String kind,
-                                   String name,
-                                   List<String> annotations,
-                                   int lineNumber,
-                                   String line,
-                                   boolean includeSnippet) {
-        ObjectNode node = objectMapper.createObjectNode();
-        node.put("kind", safeText(kind));
-        node.put("name", safeText(name));
-        node.set("annotations", toArrayNode(annotations));
-        node.put("lineNumber", lineNumber);
-        putSnippetIfNeeded(node, line, includeSnippet);
-        return node;
-    }
-
-    private void addLimited(ArrayNode arrayNode, ObjectNode item, AnalysisState state) {
-        if (arrayNode == null || item == null || state == null) {
-            return;
+    private String firstText(ObjectNode arguments, String... fields) { // 从 arguments 取第一个非空字段。
+        if (arguments == null || fields == null) { // 空输入。
+            return ""; // 返回空。
         }
-        if (state.items >= state.maxItems) {
-            state.truncated = true;
-            return;
-        }
-        arrayNode.add(item);
-        state.items++;
-    }
-
-    private String mappingAnnotationName(String annotation) {
-        if (annotation == null) {
-            return null;
-        }
-        String[] names = {"@GetMapping", "@PostMapping", "@PutMapping", "@DeleteMapping", "@PatchMapping", "@RequestMapping"};
-        for (String name : names) {
-            if (annotation.contains(name)) {
-                return name.substring(1);
+        for (String field : fields) { // 遍历字段。
+            String value = arguments.path(field).asText(""); // 读取字段。
+            if (value != null && !value.isBlank()) { // 命中非空。
+                return value; // 返回值。
             }
         }
-        return null;
+        return ""; // 没有非空。
     }
 
-    private String httpMethodFromMappingAnnotation(String annotation, String mappingAnnotation) {
-        if ("GetMapping".equals(mappingAnnotation)) {
-            return "GET";
+    private String firstText(ObjectNode arguments, JsonNode innerResult, String field) { // 从 arguments 和内部结果中取目标字段。
+        String fromArguments = arguments == null ? "" : arguments.path(field).asText(""); // 优先参数。
+        if (fromArguments != null && !fromArguments.isBlank()) { // 参数有值。
+            return fromArguments; // 返回参数值。
         }
-        if ("PostMapping".equals(mappingAnnotation)) {
-            return "POST";
-        }
-        if ("PutMapping".equals(mappingAnnotation)) {
-            return "PUT";
-        }
-        if ("DeleteMapping".equals(mappingAnnotation)) {
-            return "DELETE";
-        }
-        if ("PatchMapping".equals(mappingAnnotation)) {
-            return "PATCH";
-        }
-        Matcher matcher = Pattern.compile("RequestMethod\\.([A-Z]+)").matcher(annotation == null ? "" : annotation);
-        return matcher.find() ? matcher.group(1) : "REQUEST";
+        String fromInner = innerResult == null ? "" : innerResult.path(field).asText(""); // 再读内部结果。
+        return fromInner == null ? "" : fromInner; // 返回内部值。
     }
 
-    private String firstMappingPath(List<String> annotations, String targetAnnotation) {
-        if (annotations == null || annotations.isEmpty()) {
-            return "";
-        }
-        for (String annotation : annotations) {
-            if (annotation != null && annotation.contains(targetAnnotation)) {
-                return extractAnnotationPath(annotation);
-            }
-        }
-        return "";
-    }
-
-    private String extractAnnotationPath(String annotation) {
-        if (annotation == null || annotation.isBlank()) {
-            return "";
-        }
-        Matcher quoted = Pattern.compile("\"([^\"]*)\"").matcher(annotation);
-        if (quoted.find()) {
-            return quoted.group(1);
-        }
-        Matcher named = Pattern.compile("(?:path|value)\\s*=\\s*\\{?\\s*\"([^\"]*)\"").matcher(annotation);
-        return named.find() ? named.group(1) : "";
-    }
-
-    private String joinPaths(String basePath, String methodPath) {
-        String base = normalizeEndpointPath(basePath);
-        String method = normalizeEndpointPath(methodPath);
-        if (base.isEmpty()) {
-            return method.isEmpty() ? "/" : method;
-        }
-        if (method.isEmpty() || "/".equals(method)) {
-            return base;
-        }
-        return (base + "/" + method.substring(1)).replaceAll("/{2,}", "/");
-    }
-
-    private String normalizeEndpointPath(String path) {
-        String value = path == null ? "" : path.trim();
-        if (value.isEmpty()) {
-            return "";
-        }
-        return value.startsWith("/") ? value : "/" + value;
-    }
-
-    private boolean hasAnnotation(List<String> annotations, String annotationName) {
-        if (annotations == null) {
-            return false;
-        }
-        for (String annotation : annotations) {
-            if (annotation != null && annotation.contains("@" + annotationName)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private boolean isJavaMethodLine(String trimmed, Matcher methodMatcher) {
-        if (trimmed == null || trimmed.isBlank() || trimmed.contains("=")) {
-            return false;
-        }
-        String name = methodMatcher.group(3);
-        String returnType = methodMatcher.group(2);
-        return !isJavaKeyword(name) && !isJavaKeyword(returnType) && !trimmed.startsWith("new ");
-    }
-
-    private boolean isJavaFieldLine(String trimmed) {
-        return trimmed != null
-                && !trimmed.contains("(")
-                && !trimmed.startsWith("return ")
-                && !trimmed.startsWith("throw ")
-                && !trimmed.startsWith("package ")
-                && !trimmed.startsWith("import ");
-    }
-
-    private boolean isJavaKeyword(String value) {
-        if (value == null) {
-            return true;
-        }
-        return Set.of("if", "for", "while", "switch", "catch", "return", "throw", "new", "else", "do", "try")
-                .contains(value.trim());
-    }
-
-    private int braceDelta(String line) {
-        int delta = 0;
-        boolean inString = false;
-        char previous = 0;
-        for (int i = 0; line != null && i < line.length(); i++) {
-            char ch = line.charAt(i);
-            if (ch == '"' && previous != '\\') {
-                inString = !inString;
-            }
-            if (!inString && ch == '{') {
-                delta++;
-            } else if (!inString && ch == '}') {
-                delta--;
-            }
-            previous = ch;
-        }
-        return delta;
-    }
-
-    private String visibility(String value) {
-        return value == null || value.isBlank() ? "package-private" : value.trim();
-    }
-
-    private ArrayNode toArrayNode(List<String> values) {
-        ArrayNode arrayNode = objectMapper.createArrayNode();
-        if (values != null) {
-            for (String value : values) {
-                if (value != null && !value.isBlank()) {
-                    arrayNode.add(value.trim());
-                }
-            }
-        }
-        return arrayNode;
-    }
-
-    private ArrayNode splitToArrayNode(String value) {
-        ArrayNode arrayNode = objectMapper.createArrayNode();
-        if (value == null || value.isBlank()) {
-            return arrayNode;
-        }
-        for (String item : value.split(",")) {
-            String normalized = compactSpaces(item);
-            if (!normalized.isBlank()) {
-                arrayNode.add(normalized);
-            }
-        }
-        return arrayNode;
-    }
-
-    private void putSnippetIfNeeded(ObjectNode node, String line, boolean includeSnippet) {
-        if (includeSnippet) {
-            node.put("snippet", abbreviate(compactSpaces(line), MAX_SNIPPET_CHARS));
+    private void putIfText(ObjectNode node, String fieldName, String value) { // 非空时写入字段。
+        if (value != null && !value.isBlank()) { // 有值才写。
+            node.put(fieldName, value); // 写入文本。
         }
     }
 
-    private boolean resolveIncludeSnippet(JsonNode arguments) {
-        if (arguments == null || arguments.isMissingNode() || arguments.isNull()) {
-            return true;
+    private void copyText(ObjectNode target, JsonNode source, String fieldName) { // 复制文本字段。
+        String value = source == null ? "" : source.path(fieldName).asText(""); // 读取来源。
+        if (value != null && !value.isBlank()) { // 有值才复制。
+            target.put(fieldName, value); // 写入目标。
         }
-        JsonNode valueNode = arguments.path("includeSnippet");
-        return valueNode.isMissingNode() || valueNode.isNull() || valueNode.asBoolean(true);
     }
 
-    private int resolveMaxItems(JsonNode arguments) {
-        int maxItems = getOptionalInt(arguments, "maxItems", DEFAULT_MAX_ITEMS);
-        if (maxItems <= 0) {
-            return DEFAULT_MAX_ITEMS;
+    private int clamp(int value, int min, int max) { // 限制整数范围。
+        return Math.max(min, Math.min(max, value)); // 返回夹紧后的值。
+    }
+
+    private boolean looksLikeToolTarget(String pathOrClass) { // 判断目标文本是否像 AI Tool 类/文件。
+        if (pathOrClass == null || pathOrClass.isBlank()) { // 空值。
+            return false; // 不像。
         }
-        return Math.min(maxItems, MAX_ALLOWED_ITEMS);
+        String lower = pathOrClass.replace('\\', '/').toLowerCase(Locale.ROOT); // 统一路径和大小写。
+        return lower.endsWith("tool.java") || lower.endsWith("tool") || lower.contains("/tool/"); // Tool 文件/类/目录。
     }
 
-    private String normalizeLanguageKey(String language, String extension) {
-        String value = language == null || language.isBlank() ? extension : language;
-        if (value == null) {
-            return "";
-        }
-        String normalized = value.trim().toLowerCase(Locale.ROOT);
-        return switch (normalized) {
-            case "java" -> "java";
-            case "py", "python" -> "python";
-            case "js", "jsx", "javascript" -> "javascript";
-            case "ts", "tsx", "typescript" -> "typescript";
-            case "vue" -> "vue";
-            case "go", "golang" -> "go";
-            case "sql" -> "sql";
-            default -> normalized;
-        };
-    }
-
-    private String toWorkspaceRelativePath(Path filePath, String fallbackPath) {
-        try {
-            Path workspaceRoot = projectPathGuard.getWorkspaceRoot().toAbsolutePath().normalize();
-            Path normalizedPath = filePath.toAbsolutePath().normalize();
-            if (normalizedPath.startsWith(workspaceRoot)) {
-                return workspaceRoot.relativize(normalizedPath).toString().replace('\\', '/');
-            }
-        } catch (Exception ignored) {
-            // fallback below
-        }
-        return safeRelativePath(fallbackPath);
-    }
-
-    private String safeRelativePath(String value) {
-        return value == null ? "" : value.replace('\\', '/');
-    }
-
-    private String normalizeFailureMessage(String message) {
-        return message == null || message.isBlank() ? "代码结构分析失败。" : message;
-    }
-
-    private String buildFailureResult(String path, String message) {
-        ObjectNode result = objectMapper.createObjectNode();
-        result.put("type", RESULT_TYPE);
-        result.put("success", false);
-        result.put("path", safeRelativePath(path));
-        result.put("message", message);
-        return result.toString();
-    }
-
-    private String compactSpaces(String value) {
-        return value == null ? "" : value.trim().replaceAll("\\s+", " ");
-    }
-
-    private String safeText(String value) {
-        return value == null ? "" : value.trim();
-    }
-
-    private String trimToNull(String value) {
-        return value == null || value.trim().isEmpty() ? null : value.trim();
-    }
-
-    private boolean contains(String text, String keyword) {
-        return text != null && keyword != null && text.contains(keyword);
-    }
-
-    private boolean containsLine(List<String> lines, String keyword) {
-        if (lines == null || keyword == null) {
-            return false;
-        }
-        for (String line : lines) {
-            if (line != null && line.contains(keyword)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private String abbreviate(String value, int maxLength) {
-        String text = value == null ? "" : value;
-        if (text.length() <= maxLength) {
-            return text;
-        }
-        return text.substring(0, Math.max(0, maxLength)) + "...[snippet truncated]";
-    }
-
-    private boolean looksLikeBasicSymbol(String trimmed) {
-        return trimmed.startsWith("function ")
-                || trimmed.startsWith("class ")
-                || trimmed.startsWith("interface ")
-                || trimmed.startsWith("type ")
-                || trimmed.startsWith("def ")
-                || trimmed.startsWith("func ");
-    }
-
-    private String firstSymbolName(String trimmed) {
-        if (trimmed == null || trimmed.isBlank()) {
-            return "";
-        }
-        String[] parts = trimmed.split("\\s+|\\(");
-        return parts.length >= 2 ? parts[1].replaceAll("[^A-Za-z0-9_$-]", "") : parts[0];
-    }
-
-    private String cleanSqlTableName(String tableName) {
-        return tableName == null ? "" : tableName.replace("`", "")
-                .replace("\"", "")
-                .replace("[", "")
-                .replace("]", "")
-                .trim();
-    }
-
-    private static class AnalysisState {
-        private final int maxItems;
-        private final boolean includeSnippet;
-        private int items;
-        private boolean truncated;
-
-        private AnalysisState(int maxItems, boolean includeSnippet) {
-            this.maxItems = maxItems;
-            this.includeSnippet = includeSnippet;
-        }
+    private String previewTarget(ObjectNode arguments) { // 构造安全日志目标预览。
+        return buildTarget(arguments, objectMapper.createObjectNode()).toString(); // 只含路径、类名、endpoint 等短字段。
     }
 }
