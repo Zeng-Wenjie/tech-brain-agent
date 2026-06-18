@@ -91,6 +91,7 @@ public class CodeTestStepGenerator extends AbstractCodeAnalysisHandler { // P5.8
         ArrayNode logChecks = objectMapper.createArrayNode(); // 日志验证。
         ArrayNode regressionChecks = objectMapper.createArrayNode(); // 回归验证。
         ArrayNode warnings = objectMapper.createArrayNode(); // 生成边界说明。
+        ObjectNode sourceStats = buildSourceStats(testScope, primary, risks); // 汇总真实扫描命中的关键数量，帮助前端/最终回答判断测试步骤可信度。
         fillPreconditions(testScope, primary, preconditions); // 从真实目标生成前置条件。
         fillScopeTestCases(testScope, primary, risks, state); // 从主分析结果生成范围测试用例。
         if (includeRiskCases) { // 用户允许结合风险点。
@@ -108,6 +109,7 @@ public class CodeTestStepGenerator extends AbstractCodeAnalysisHandler { // P5.8
         result.set("testCases", state.testCases); // 写入测试用例。
         result.set("logChecks", logChecks); // 写入日志检查。
         result.set("regressionChecks", regressionChecks); // 写入回归检查。
+        result.set("sourceStats", sourceStats); // 写入真实扫描来源统计，避免用户误以为测试步骤来自猜测。
         result.set("warnings", warnings); // 写入 warnings。
         return result.toString(); // 返回内层 JSON 字符串。
     }
@@ -228,12 +230,24 @@ public class CodeTestStepGenerator extends AbstractCodeAnalysisHandler { // P5.8
         }
         if (testScope == CodeTestScope.CONTROLLER_ENDPOINT) { // 接口测试。
             preconditions.add("准备可访问后端服务和 Swagger/Postman/curl 等接口调试方式。"); // API 前置。
+            String endpoint = firstNonBlank(text(result, "endpoint"), firstEndpointPath(result.path("endpoints"))); // 读取真实 endpoint。
+            String method = firstNonBlank(text(result, "httpMethod"), firstHttpMethod(result.path("endpoints"))); // 读取真实 HTTP 方法。
+            if (!endpoint.isBlank()) { // 有真实接口路径。
+                preconditions.add("确认本次接口目标为：" + safe(method) + " " + safe(endpoint)); // 明确真实接口，不让 finalAnswer 误把 endpoint 当 path。
+            }
         }
         if (testScope == CodeTestScope.SSE_CHAIN) { // SSE 测试。
             preconditions.add("准备可观察 text/event-stream 输出和前端事件处理日志的调试环境。"); // SSE 前置。
+            String endpoint = firstNonBlank(text(result, "endpoint"), firstEndpointPath(result.path("backendSseEndpoints"))); // 读取 SSE endpoint。
+            String eventName = firstNonBlank(text(result, "eventName"), firstEventName(result)); // 读取真实事件名。
+            preconditions.add("确认本次 SSE 目标：" + safe(endpoint) + "，事件：" + safe(eventName)); // 明确真实 SSE 目标。
         }
         if (testScope == CodeTestScope.TOOL_CHAIN) { // Tool 测试。
             preconditions.add("准备聊天窗口和工具调用详情页，用于检查 tool_call_log、arguments_json 与 result_json。"); // Tool 前置。
+            String toolName = firstNonBlank(text(result, "toolName"), result.path("aiToolInfo").path("toolName").asText("")); // 读取真实 toolName。
+            if (!toolName.isBlank()) { // 有真实 Tool 名。
+                preconditions.add("确认本次 AI Tool 目标为：" + safe(toolName)); // 明确 Tool 目标。
+            }
         }
     }
 
@@ -250,17 +264,19 @@ public class CodeTestStepGenerator extends AbstractCodeAnalysisHandler { // P5.8
     private void fillClassTestCases(JsonNode result, TestStepState state) { // 生成类/文件测试步骤。
         String className = firstNonBlank(result.path("classInfo").path("name").asText(""), text(result, "className"), text(result, "fileName")); // 类名。
         String path = text(result, "path"); // 文件路径。
+        String methodSummary = methodSummary(result.path("methods"), 5); // 真实方法摘要。
         addTestCase(state, "类结构基础验证", "MANUAL", "MEDIUM", "HIGH",
                 steps("打开 analyzeCode 工具调用详情，确认 analysisType=TEST_STEPS。",
                         "检查 result_json.target.path 或 result.path 是否指向 " + safe(path) + "。",
-                        "核对类名、字段、方法和注解是否与代码结构分析结果一致。"),
+                        "核对类名、字段、方法和注解是否与代码结构分析结果一致。",
+                        "重点核对已扫描到的方法：" + safe(methodSummary)),
                 expected("能够看到 " + safe(className) + " 的真实结构信息。",
                         "测试步骤未输出完整源码，也未出现服务器绝对路径。"),
                 evidenceFromResult(result, "CLASS_DECLARATION"), null); // 类结构验证。
         if (result.path("methods").isArray() && result.path("methods").size() > 0) { // 有方法列表。
             addTestCase(state, "关键方法可达性验证", "MANUAL", "MEDIUM", "HIGH",
-                    steps("从 methods 中选取入口或公开方法。",
-                            "分别触发对应功能或通过 Swagger/聊天入口间接调用。",
+                    steps("从 methods 中优先选取公开入口方法：" + safe(methodSummary) + "。",
+                            "分别触发对应功能或通过 Swagger/聊天入口间接调用，不测试未扫描到的方法。",
                             "记录每个方法的正常返回、异常返回和日志表现。"),
                     expected("关键方法都有可观测的正常路径和失败路径。",
                             "未扫描到的方法不纳入测试结论。"),
@@ -303,15 +319,19 @@ public class CodeTestStepGenerator extends AbstractCodeAnalysisHandler { // P5.8
     private void fillControllerTestCases(JsonNode result, JsonNode risks, TestStepState state) { // 生成 Controller 接口测试步骤。
         String endpoint = firstNonBlank(text(result, "endpoint"), firstEndpointPath(result.path("endpoints"))); // endpoint。
         String httpMethod = firstHttpMethod(result.path("endpoints")); // HTTP 方法。
+        String controllerMethod = firstControllerMethod(result.path("endpoints")); // Controller 方法。
+        String serviceSummary = serviceCallSummary(result.path("serviceCalls"), 5); // 真实 Service 调用摘要。
         addTestCase(state, "接口正常请求", "API", "HIGH", "HIGH",
-                steps("在 Swagger/Postman/curl 中请求 " + safe(httpMethod) + " " + safe(endpoint) + "。",
-                        "按 Controller 方法声明准备正常请求参数、请求体或 path variable。",
-                        "观察返回结构、HTTP 状态和后端日志。"),
+                steps("在 Swagger/Postman/curl 中请求真实扫描到的接口：" + safe(httpMethod) + " " + safe(endpoint) + "。",
+                        "确认命中的 Controller 方法为：" + safe(controllerMethod) + "。",
+                        "按 mappingAnnotation 和方法声明准备请求参数、请求体或 path variable。",
+                        "观察返回结构、HTTP 状态和后端日志；如果扫描到 Service 调用，同步关注：" + safe(serviceSummary)),
                 expected("接口能够返回成功响应或项目统一成功结构。",
                         "若该接口是 SSE，应返回 text/event-stream，并持续输出事件直到 done 或完成。"),
                 evidenceFromEndpoints(result), requestExampleForEndpoint(result)); // 正常请求。
         addTestCase(state, "参数边界与异常请求", "API", "HIGH", "MEDIUM",
-                steps("分别构造缺少必填参数、空 request body、非法 path variable 和超长字段。",
+                steps("围绕真实接口 " + safe(httpMethod) + " " + safe(endpoint) + " 构造缺少必填参数、空 request body、非法 path variable 和超长字段。",
+                        endpoint.contains("{") ? "优先覆盖路径变量边界：" + safe(endpoint) : "当前 endpoint 未扫描到路径变量，路径变量场景只作为人工确认项。",
                         "发送请求并记录返回结构。",
                         "检查 Controller 或 Service 是否返回可读错误，而不是服务器内部异常细节。"),
                 expected("异常输入能够得到明确错误响应。",
@@ -320,7 +340,7 @@ public class CodeTestStepGenerator extends AbstractCodeAnalysisHandler { // P5.8
         if (result.path("serviceCalls").isArray() && result.path("serviceCalls").size() > 0) { // 有 Service 调用。
             addTestCase(state, "Controller 到 Service 调用验证", "REGRESSION", "MEDIUM", "HIGH",
                     steps("触发接口正常请求。",
-                            "通过日志、断点或可观测结果确认 Controller 方法调用到扫描出的 Service 方法。",
+                            "通过日志、断点或可观测结果确认 Controller 方法调用到扫描出的 Service 方法：" + safe(serviceSummary) + "。",
                             "maxDepth=2 时同步核对 ServiceImpl 内部一层调用候选。"),
                     expected("Controller 不直接承载复杂业务，核心流程进入扫描出的 Service 候选链路。",
                             "ServiceImpl 目标为候选结果，需要人工核对真实实现类。"),
@@ -330,6 +350,16 @@ public class CodeTestStepGenerator extends AbstractCodeAnalysisHandler { // P5.8
 
     private void fillToolTestCases(JsonNode result, JsonNode risks, TestStepState state) { // 生成 AI Tool 测试步骤。
         addToolRouteCase(result, state); // 基础 Tool 路由验证。
+        String dependencySummary = dependencySummary(result.path("dependencies"), 8); // 真实依赖摘要。
+        if (!dependencySummary.isBlank()) { // 有真实依赖对象。
+            addTestCase(state, "Tool 依赖组件装配验证", "REGRESSION", "MEDIUM", "HIGH",
+                    steps("查看 Tool 分析结果中的 dependencies。",
+                            "逐项核对依赖字段、类型、kind、injectionType 和 candidateFiles。",
+                            "重点验证依赖组件：" + safe(dependencySummary)),
+                    expected("Tool 的依赖对象均来自真实字段或构造器注入扫描结果。",
+                            "candidateFiles 指向 workspace 内存在的候选文件，不返回绝对路径。"),
+                    evidenceFromArray(result.path("dependencies"), text(result, "path"), "DEPENDENCY_DECLARATION"), null); // 依赖验证。
+        }
         addTestCase(state, "Tool 参数缺失和失败路径", "TOOL_CALLING", "HIGH", "HIGH",
                 steps("在聊天中输入缺少必要目标的 Tool 场景，例如只说“读取文件”或“分析它”。",
                         "打开工具调用详情，检查 arguments_json 是否只包含真实可解析目标。",
@@ -347,6 +377,25 @@ public class CodeTestStepGenerator extends AbstractCodeAnalysisHandler { // P5.8
                     mergeEvidence(evidenceFromArray(result.path("guardCalls"), text(result, "path"), "PATH_GUARD_CALL"),
                             evidenceFromRisks(risks, "PATH_TRAVERSAL")), "读取 ../../application.yml"); // 路径安全。
         }
+        if (result.path("serviceCalls").isArray() && result.path("serviceCalls").size() > 0) { // Tool 直接调用业务 Service。
+            String serviceSummary = componentCallSummary(result.path("serviceCalls"), 5); // Service 调用摘要。
+            addTestCase(state, "Tool 到业务 Service 调用验证", "TOOL_CALLING", "HIGH", "HIGH",
+                    steps("触发 Tool 正常执行路径。",
+                            "通过工具结果、日志或断点确认 execute/内部方法调用到业务 Service：" + safe(serviceSummary) + "。",
+                            "如果 ServiceImpl 候选存在，进一步核对 serviceMethodCalls 中的一层调用。"),
+                    expected("Tool 只在真实业务路径调用扫描出的 Service 候选。",
+                            "Service/ServiceImpl 候选不作为绝对结论，需要结合运行日志或断点确认。"),
+                    evidenceFromArray(result.path("serviceCalls"), text(result, "path"), "SERVICE_CALL"), null); // Service 调用验证。
+        }
+        if (result.path("registryCalls").isArray() && result.path("registryCalls").size() > 0) { // ToolRegistry 或 Registry 调用。
+            addTestCase(state, "Registry/ToolRegistry 调用验证", "TOOL_CALLING", "MEDIUM", "MEDIUM",
+                    steps("触发包含 Registry 调用的 Tool 路径。",
+                            "核对 registryCalls 中的 objectName、targetType、methodName 是否真实发生。",
+                            "检查未注册 Tool 或未命中 Registry 时是否返回结构化失败结果。"),
+                    expected("Registry 调用只使用已注册或真实扫描到的目标。",
+                            "失败路径不会伪造不存在的 Tool，也不会泄漏内部协议。"),
+                    evidenceFromArray(result.path("registryCalls"), text(result, "path"), "REGISTRY_CALL"), null); // Registry 验证。
+        }
         if (result.path("mapperCalls").size() > 0 || result.path("repositoryCalls").size() > 0) { // 有数据库候选调用。
             addTestCase(state, "数据库相关调用验证", "REGRESSION", "MEDIUM", "MEDIUM",
                     steps("触发 Tool 正常执行路径。",
@@ -361,11 +410,12 @@ public class CodeTestStepGenerator extends AbstractCodeAnalysisHandler { // P5.8
 
     private void addToolRouteCase(JsonNode result, TestStepState state) { // 添加 Tool Calling 基础验证。
         String toolName = firstNonBlank(result.path("aiToolInfo").path("toolName").asText(""), text(result, "toolName")); // toolName。
+        String entryMethod = firstNonBlank(text(result, "entryMethod"), "execute"); // Tool 入口方法。
         addTestCase(state, "Tool 路由和 result_json 验证", "TOOL_CALLING", "HIGH", "HIGH",
                 steps("在聊天中输入能触发 " + safe(toolName) + " 的真实用户问题。",
                         "打开工具调用详情。",
                         "检查 tool_name、arguments_json 和 result_json.type 是否与该 Tool 预期一致。",
-                        "检查 finalAnswer 是否基于工具结果输出，不泄漏 DSML/tool_calls。"),
+                        "确认入口方法为 " + safe(entryMethod) + "，并检查 finalAnswer 是否基于工具结果输出，不泄漏内部工具调用协议。"),
                 expected("工具调用成功进入对应 Tool。",
                         "arguments_json 只包含真实解析出的 path/toolName/className/methodName 等参数。",
                         "tool_call_log 中 final_answer 最终被回填。"),
@@ -375,8 +425,12 @@ public class CodeTestStepGenerator extends AbstractCodeAnalysisHandler { // P5.8
     private void fillSseTestCases(JsonNode result, TestStepState state) { // 生成 SSE 链路测试步骤。
         String endpoint = firstNonBlank(text(result, "endpoint"), firstEndpointPath(result.path("backendSseEndpoints"))); // SSE endpoint。
         String eventName = firstNonBlank(text(result, "eventName"), firstEventName(result)); // 事件名。
+        String backendSummary = sseBackendSummary(result); // 后端 SSE 摘要。
+        String frontendSummary = sseFrontendSummary(result); // 前端 SSE 摘要。
         addTestCase(state, "SSE 正常事件流", "SSE", "HIGH", "HIGH",
-                steps("从前端或接口工具发起 " + safe(endpoint) + " 的流式请求。",
+                steps("从真实扫描到的发起点或接口工具请求 SSE endpoint：" + safe(endpoint) + "。",
+                        "后端命中点：" + safe(backendSummary) + "。",
+                        "前端命中点：" + safe(frontendSummary) + "。",
                         "确认响应 Content-Type 为 text/event-stream 或前端以 ReadableStream/EventSource 处理。",
                         "观察是否接收到 " + safe(eventName) + "、tool_call/tool_result、done 等真实扫描到的事件。"),
                 expected("后端持续推送事件，最终发送 done 或正常完成。",
@@ -769,10 +823,10 @@ public class CodeTestStepGenerator extends AbstractCodeAnalysisHandler { // P5.8
         String endpoint = firstNonBlank(text(result, "endpoint"), text(result, "path"), text(result, "fullPath"),
                 firstEndpointPath(result.path("endpoints")), firstEndpointPath(result.path("backendSseEndpoints"))); // endpoint。
         String method = firstNonBlank(text(result, "httpMethod"), firstHttpMethod(result.path("endpoints"))); // HTTP 方法。
-        if (method.isBlank() || "-".equals(method)) { // 无方法。
-            method = "POST"; // 常见聊天接口默认 POST，但只是示例。
+        if (endpoint.isBlank()) { // 没有真实 endpoint。
+            return ""; // 不生成请求示例，避免捏造。
         }
-        return endpoint.isBlank() ? "" : method + " " + endpoint; // 返回示例。
+        return method.isBlank() || "-".equals(method) ? endpoint : method + " " + endpoint; // 只在真实扫描到 HTTP 方法时拼接方法。
     }
 
     private String requestExampleForTool(String toolName) { // 构造 Tool 调用示例。
@@ -797,9 +851,17 @@ public class CodeTestStepGenerator extends AbstractCodeAnalysisHandler { // P5.8
 
     private String firstHttpMethod(JsonNode endpoints) { // 从 endpoint 数组读 HTTP 方法。
         if (endpoints != null && endpoints.isArray() && endpoints.size() > 0) { // 有 endpoint。
-            return endpoints.get(0).path("httpMethod").asText("-"); // 返回方法。
+            return firstNonBlank(endpoints.get(0).path("httpMethod").asText(""), endpoints.get(0).path("method").asText("")); // 返回真实方法。
         }
-        return "-"; // 无。
+        return ""; // 无。
+    }
+
+    private String firstControllerMethod(JsonNode endpoints) { // 从 endpoint 数组读取 Controller 方法名。
+        if (endpoints != null && endpoints.isArray() && endpoints.size() > 0) { // 有 endpoint。
+            JsonNode first = endpoints.get(0); // 第一条 endpoint。
+            return firstNonBlank(text(first, "controllerMethod"), text(first, "methodName")); // 兼容不同 Analyzer 字段。
+        }
+        return ""; // 无。
     }
 
     private String firstEventName(JsonNode result) { // 从 SSE 结果读第一个事件名。
@@ -850,6 +912,155 @@ public class CodeTestStepGenerator extends AbstractCodeAnalysisHandler { // P5.8
             }
         }
         return false; // 未命中。
+    }
+
+    private ObjectNode buildSourceStats(CodeTestScope testScope, JsonNode primary, JsonNode risks) { // 构造真实扫描来源统计。
+        ObjectNode stats = objectMapper.createObjectNode(); // 统计对象。
+        stats.put("testScope", testScope.name()); // 测试范围。
+        stats.put("methodCount", arraySize(primary.path("methods"))); // 方法数量。
+        stats.put("endpointCount", Math.max(arraySize(primary.path("endpoints")), arraySize(primary.path("springEndpoints")))); // endpoint 数量。
+        stats.put("serviceCallCount", arraySize(primary.path("serviceCalls"))); // Service 调用数量。
+        stats.put("dependencyCount", arraySize(primary.path("dependencies"))); // 依赖数量。
+        stats.put("guardCallCount", arraySize(primary.path("guardCalls"))); // Guard 调用数量。
+        stats.put("registryCallCount", arraySize(primary.path("registryCalls"))); // Registry 调用数量。
+        stats.put("mapperCallCount", arraySize(primary.path("mapperCalls"))); // Mapper 调用数量。
+        stats.put("repositoryCallCount", arraySize(primary.path("repositoryCalls"))); // Repository 调用数量。
+        stats.put("frontendCallCount", arraySize(primary.path("frontendCalls"))); // 前端调用点数量。
+        stats.put("frontendHandlerCount", arraySize(primary.path("frontendEventHandlers"))); // 前端事件处理数量。
+        stats.put("backendSseEndpointCount", arraySize(primary.path("backendSseEndpoints"))); // 后端 SSE endpoint 数量。
+        stats.put("backendEventSenderCount", arraySize(primary.path("backendEventSenders"))); // 后端事件发送数量。
+        stats.put("riskCount", arraySize(risks.path("risks"))); // 风险数量。
+        stats.put("accuracyBasis", "ONLY_SCANNED_EVIDENCE"); // 明确只基于真实扫描证据。
+        return stats; // 返回统计。
+    }
+
+    private int arraySize(JsonNode node) { // 安全读取数组长度。
+        return node != null && node.isArray() ? node.size() : 0; // 非数组按0。
+    }
+
+    private String methodSummary(JsonNode methods, int limit) { // 生成真实方法摘要。
+        if (methods == null || !methods.isArray() || methods.isEmpty()) { // 没有方法。
+            return ""; // 返回空。
+        }
+        StringBuilder summary = new StringBuilder(); // 摘要。
+        int count = 0; // 已输出数量。
+        for (JsonNode method : methods) { // 遍历方法。
+            if (count >= limit) { // 达到上限。
+                break; // 停止。
+            }
+            String name = text(method, "name"); // 方法名。
+            if (name.isBlank()) { // 空方法名。
+                continue; // 跳过。
+            }
+            if (!summary.isEmpty()) { // 已有内容。
+                summary.append("、"); // 分隔。
+            }
+            summary.append(name); // 方法名。
+            String parameters = text(method, "parameters"); // 参数。
+            if (!parameters.isBlank()) { // 有参数。
+                summary.append("(").append(safe(parameters)).append(")"); // 附带参数，便于准确测试。
+            }
+            count++; // 计数。
+        }
+        return summary.toString(); // 返回摘要。
+    }
+
+    private String serviceCallSummary(JsonNode serviceCalls, int limit) { // 生成 Controller→Service 调用摘要。
+        if (serviceCalls == null || !serviceCalls.isArray() || serviceCalls.isEmpty()) { // 无 Service 调用。
+            return "未扫描到 Service 调用"; // 明确没有命中。
+        }
+        StringBuilder summary = new StringBuilder(); // 摘要。
+        int count = 0; // 计数。
+        for (JsonNode call : serviceCalls) { // 遍历调用。
+            if (count >= limit) { // 达到上限。
+                break; // 停止。
+            }
+            if (!summary.isEmpty()) { // 已有内容。
+                summary.append("、"); // 分隔。
+            }
+            summary.append(firstNonBlank(text(call, "serviceObject"), text(call, "objectName"), text(call, "serviceType"), "Service"))
+                    .append(".")
+                    .append(firstNonBlank(text(call, "serviceMethod"), text(call, "methodName"), "-")); // 拼接对象.方法。
+            count++; // 计数。
+        }
+        return summary.toString(); // 返回。
+    }
+
+    private String dependencySummary(JsonNode dependencies, int limit) { // 生成依赖对象摘要。
+        if (dependencies == null || !dependencies.isArray() || dependencies.isEmpty()) { // 无依赖。
+            return ""; // 返回空。
+        }
+        StringBuilder summary = new StringBuilder(); // 摘要。
+        int count = 0; // 计数。
+        for (JsonNode dependency : dependencies) { // 遍历依赖。
+            if (count >= limit) { // 达到上限。
+                break; // 停止。
+            }
+            String fieldName = text(dependency, "fieldName"); // 字段名。
+            String type = text(dependency, "type"); // 类型。
+            String kind = text(dependency, "kind"); // 分类。
+            if (fieldName.isBlank() && type.isBlank()) { // 无有效字段。
+                continue; // 跳过。
+            }
+            if (!summary.isEmpty()) { // 已有内容。
+                summary.append("、"); // 分隔。
+            }
+            summary.append(firstNonBlank(fieldName, "-")).append(":").append(firstNonBlank(type, "-")); // 字段:类型。
+            if (!kind.isBlank()) { // 有分类。
+                summary.append("(").append(kind).append(")"); // 附带 kind。
+            }
+            count++; // 计数。
+        }
+        return summary.toString(); // 返回。
+    }
+
+    private String componentCallSummary(JsonNode calls, int limit) { // 生成组件调用摘要。
+        if (calls == null || !calls.isArray() || calls.isEmpty()) { // 无调用。
+            return ""; // 返回空。
+        }
+        StringBuilder summary = new StringBuilder(); // 摘要。
+        int count = 0; // 计数。
+        for (JsonNode call : calls) { // 遍历调用。
+            if (count >= limit) { // 达到上限。
+                break; // 停止。
+            }
+            if (!summary.isEmpty()) { // 已有内容。
+                summary.append("、"); // 分隔。
+            }
+            summary.append(firstNonBlank(text(call, "objectName"), text(call, "serviceObject"), text(call, "targetType"), "-"))
+                    .append(".")
+                    .append(firstNonBlank(text(call, "methodName"), text(call, "serviceMethod"), "-")); // 对象.方法。
+            count++; // 计数。
+        }
+        return summary.toString(); // 返回。
+    }
+
+    private String sseBackendSummary(JsonNode result) { // 生成后端 SSE 命中摘要。
+        JsonNode endpoints = result.path("backendSseEndpoints"); // 后端 SSE endpoint。
+        if (endpoints.isArray() && !endpoints.isEmpty()) { // 有后端 endpoint。
+            JsonNode first = endpoints.get(0); // 第一项。
+            return firstNonBlank(text(first, "httpMethod"), text(first, "method")) + " "
+                    + firstNonBlank(text(first, "endpoint"), text(first, "path")) + " -> "
+                    + firstNonBlank(text(first, "controllerClass"), "-") + "."
+                    + firstNonBlank(text(first, "controllerMethod"), "-"); // 后端摘要。
+        }
+        return "未扫描到后端 SSE Controller"; // 无后端。
+    }
+
+    private String sseFrontendSummary(JsonNode result) { // 生成前端 SSE 命中摘要。
+        JsonNode calls = result.path("frontendCalls"); // 前端发起点。
+        JsonNode handlers = result.path("frontendEventHandlers"); // 前端处理点。
+        if (calls.isArray() && !calls.isEmpty()) { // 有前端发起点。
+            JsonNode first = calls.get(0); // 第一项。
+            return firstNonBlank(text(first, "filePath"), "-") + ":" + first.path("lineNumber").asInt(0)
+                    + " " + firstNonBlank(text(first, "callType"), text(first, "method"), "frontend call"); // 前端发起摘要。
+        }
+        if (handlers.isArray() && !handlers.isEmpty()) { // 有事件处理点。
+            JsonNode first = handlers.get(0); // 第一项。
+            return firstNonBlank(text(first, "filePath"), "-") + ":" + first.path("lineNumber").asInt(0)
+                    + " event=" + firstNonBlank(text(first, "eventName"), "-"); // 前端处理摘要。
+        }
+        return "未扫描到前端发起或事件处理代码"; // 无前端。
     }
 
     private ObjectNode copyArguments(JsonNode arguments) { // 复制工具参数。
