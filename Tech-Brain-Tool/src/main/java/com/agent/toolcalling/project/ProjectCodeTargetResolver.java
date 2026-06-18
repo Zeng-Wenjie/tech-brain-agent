@@ -34,8 +34,9 @@ import java.util.regex.Pattern;
 @Component // 注册为 Spring Bean，供 ToolCallingChatServiceImpl 及后续项目代码类工具复用，统一目标解析策略。
 public class ProjectCodeTargetResolver { // 项目代码统一目标解析器。
 
-    // 接口路径：识别 /api/agent/chat、/chat/message、/batch、/article/ai/summary/{id} 这类 endpoint。
+    // 接口路径：优先识别 /api/agent/chat、/chat/message、/batch、/article/ai/summary/{id} 这类 endpoint。
     private static final Pattern ENDPOINT_PATTERN = Pattern.compile("(/[A-Za-z0-9_{}\\-]+(?:/[A-Za-z0-9_{}\\-]+)*)"); // 至少一段 / 开头路径。
+    private static final Pattern BARE_ENDPOINT_PATTERN = Pattern.compile("(?<![A-Za-z0-9_./\\\\-])([A-Za-z0-9_{}\\-]+(?:/[A-Za-z0-9_{}\\-]+)+)(?![A-Za-z0-9_./\\\\-])"); // 兜底识别 chat/message 这类无前导斜杠 endpoint。
     // 方法名：识别“sendMessage 方法 / execute 方法调用链 / xxx 函数”里的方法名。
     private static final Pattern METHOD_NAME_PATTERN = Pattern.compile("([A-Za-z_$][A-Za-z0-9_$]*)\\s*(?:方法|函数|method)"); // 方法名直接接“方法/函数/method”。
     // Tool 类名：识别 SearchCodeTool、ReadProjectFileTool.java 这类 AI Tool 目标。
@@ -46,6 +47,8 @@ public class ProjectCodeTargetResolver { // 项目代码统一目标解析器。
     private static final Set<String> METHOD_STOP_WORDS = Set.of( // 方法名提取需要排除的停用词。
             "this", "new", "return", "class", "interface", "controller", "service",
             "mapper", "repository", "tool", "impl", "void", "public", "private", "static"); // 这些词不是真正的方法名。
+    private static final Set<String> PROJECT_PATH_SEGMENTS = Set.of( // 裸路径回退时排除典型源码/资源目录片段，避免把项目相对路径识别成 endpoint。
+            "src", "main", "test", "java", "kotlin", "resources", "com", "org", "net", "io"); // 常见项目目录前缀。
 
     /**
      * 从消息中提取接口路径（endpoint）。识别 /api/xxx、/chat/message、/batch 等，排除 Tech-Brain-Agent/src/... 这类项目文件路径片段。
@@ -65,7 +68,29 @@ public class ProjectCodeTargetResolver { // 项目代码统一目标解析器。
                 return sanitizeEndpoint(candidate); // 返回清理后的接口路径。
             }
         }
+        Matcher bareMatcher = BARE_ENDPOINT_PATTERN.matcher(message); // 兜底匹配无前导 / 的 endpoint。
+        while (bareMatcher.find()) { // 逐个候选。
+            String candidate = bareMatcher.group(1); // 候选裸 endpoint。
+            if (candidate != null
+                    && !candidate.contains(".")
+                    && !looksLikeProjectRelativePath(candidate)) { // 排除相对源码路径和带扩展名文件。
+                return sanitizeEndpoint(candidate); // 统一补齐为 / 开头 endpoint。
+            }
+        }
         return null; // 没有接口路径。
+    }
+
+    private boolean looksLikeProjectRelativePath(String candidate) { // 判断裸路径候选是否更像项目相对路径而不是 API endpoint。
+        if (candidate == null || candidate.isBlank()) { // 空候选不算项目路径。
+            return false; // 返回 false。
+        }
+        String normalized = candidate.replace('\\', '/').toLowerCase(Locale.ROOT); // 统一路径分隔符和大小写。
+        String[] segments = normalized.split("/"); // 分段判断常见源码目录。
+        if (segments.length == 0) { // 没有有效段。
+            return false; // 返回 false。
+        }
+        String firstSegment = segments[0]; // 首段最能体现是 src/main/java 还是业务接口。
+        return PROJECT_PATH_SEGMENTS.contains(firstSegment); // 命中典型源码目录则不按 endpoint 处理。
     }
 
     private boolean isEndpointEmbeddedInProjectPath(String message, int start, int end) { // 判断 /xxx 是否只是项目文件路径的一段。
@@ -83,6 +108,9 @@ public class ProjectCodeTargetResolver { // 项目代码统一目标解析器。
                 || endpoint.endsWith("?") || endpoint.endsWith("！") || endpoint.endsWith("!")
                 || endpoint.endsWith("：") || endpoint.endsWith(":")) { // 去掉句尾标点。
             endpoint = endpoint.substring(0, endpoint.length() - 1); // 删除末尾标点。
+        }
+        if (!endpoint.isBlank() && !endpoint.startsWith("/")) { // chat/message 这类裸 endpoint 统一补齐前导斜杠。
+            endpoint = "/" + endpoint; // 保持下游 endpoint 规范化一致。
         }
         return endpoint.isBlank() ? null : endpoint; // 返回清理后的 endpoint。
     }
