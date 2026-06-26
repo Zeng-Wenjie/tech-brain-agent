@@ -18,9 +18,15 @@ public class ChatMessageController {
     @Autowired
     private ChatMessageService chatMessageService;
 
-    @Operation(summary = "发送会话消息")
+    @Operation(summary = "发送会话消息（智能体模式，含工具调用）")
     @PostMapping(value = "/chat/message", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter sendMessage(@RequestBody ChatRequestDTO dto) {
-        return chatMessageService.sendMessage(dto);
+        return chatMessageService.sendMessage(dto); // 智能体模式：允许 Tool Calling 工具路由（ragSearch/analyzeCode/searchCode 等）。
+    }
+
+    @Operation(summary = "发送普通会话消息（纯聊天，不调用任何工具）")
+    @PostMapping(value = "/chat/plain", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter sendPlainMessage(@RequestBody ChatRequestDTO dto) {
+        return chatMessageService.sendMessage(dto, true); // 普通聊天：关闭所有工具，直接走无工具流式回答，避免聊天时误触工具调用。
     }
 }

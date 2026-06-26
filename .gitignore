@@ -27,3 +27,7 @@ application-*.local.yaml
 docker/redis/data/
 *.rdb
 docker/milvus/volumes/ 
+
+# Local dev server launch config (contains secrets, do not commit)
+.claude/launch.json
+.claude/run-tech-brain-agent.cmd

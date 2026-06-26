@@ -12,6 +12,7 @@ import com.agent.mapper.ConversationMapper;
 import com.agent.service.ChatMessageFileService;
 import com.agent.service.ChatMessageService;
 import com.agent.service.ConversationMemoryService;
+import com.agent.service.DevActionLogService;
 import com.agent.service.ToolCallLogService;
 import com.agent.service.UserFileService;
 import com.agent.toolcalling.context.ChatAttachedFileContext;
@@ -21,6 +22,8 @@ import com.agent.toolcalling.core.ToolChatHistoryMessage;
 import com.agent.toolcalling.core.ToolCallingChatService;
 import com.agent.toolcalling.core.ToolCallingStreamCallback;
 import com.agent.toolcalling.context.ToolCallingRequestContext;
+import com.agent.toolcalling.devlog.DevActionLogRecorder;
+import com.agent.toolcalling.devlog.DevActionLogSaveResult;
 import com.agent.toolcalling.log.ToolCallLogRecorder;
 import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
@@ -80,6 +83,9 @@ public class ChatMessageServiceImpl implements ChatMessageService {
     private ToolCallLogService toolCallLogService; // 工具调用日志服务，只用于tool_call_log记录和final_answer回填。
 
     @Autowired
+    private DevActionLogService devActionLogService; // 开发行为日志服务，只用于P5.9保存代码分析结果到dev_action_log。
+
+    @Autowired
     private ConversationMemoryService conversationMemoryService; // assistant 回复完成后异步线程内更新 conversation_memory 长期记忆。
 
     @Autowired
@@ -93,13 +99,18 @@ public class ChatMessageServiceImpl implements ChatMessageService {
 
     @Override
     public SseEmitter sendMessage(ChatRequestDTO dto) {
+        return sendMessage(dto, false); // /chat/message：默认智能体模式，保持原有 Tool Calling 工具路由行为。
+    }
+
+    @Override
+    public SseEmitter sendMessage(ChatRequestDTO dto, boolean plainChat) {
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT); // HTTP 响应先返回 emitter，后续 token 通过同一连接持续推送。
         Long userId = UserContext.getUserId();
 
         CompletableFuture.runAsync(() -> { // 流式输出不放进 Controller 线程，避免连接等待阻塞请求线程。
             try {
                 UserContext.setUserId(userId); // 异步线程手动恢复当前用户，保证 ragSearch/Milvus 检索按用户过滤。
-                doSendMessage(dto, userId, emitter);
+                doSendMessage(dto, userId, emitter, plainChat); // plainChat=true 时为普通聊天，全程不进入任何工具路由。
             } catch (Exception e) {
                 sendError(emitter, e);
             } finally {
@@ -110,14 +121,14 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         return emitter;
     }
 
-    private void doSendMessage(ChatRequestDTO dto, Long userId, SseEmitter emitter) {
+    private void doSendMessage(ChatRequestDTO dto, Long userId, SseEmitter emitter, boolean plainChat) {
         validateRequest(dto); // POST /chat/message 的入口校验，允许“文字”或“附件”至少有一个。
         String rawUserMessage = resolveUserMessage(dto); // 当前轮用户原始输入，兼容 msg/message 入参。
         List<UserFile> attachedUserFiles = resolveAttachedUserFiles(dto, userId); // 校验本轮 fileIds 归属，后续用于关联表入库。
         List<ChatAttachedFileContext> attachedFiles = toAttachedFileContexts(attachedUserFiles); // 转换为 Tool Calling 安全附件元信息。
         String persistedUserMessage = resolvePersistedUserMessage(rawUserMessage); // 只保存用户真实输入，只发文件时保存空字符串。
         String modelCurrentMessage = resolveModelCurrentMessage(rawUserMessage, attachedFiles); // 模型内部 currentMessage，必要时使用隐藏附件上下文。
-        log.info("[ChatMessage] route: /chat/message"); // 明确前端真实聊天页当前走 POST /chat/message。
+        log.info("[ChatMessage] route: {}", plainChat ? "/chat/plain (plain chat, tools disabled)" : "/chat/message (agent, tools enabled)"); // 区分普通聊天与智能体模式，便于排查是否误入工具链路。
         log.debug("[ChatMessage] current answer mode: tool-calling-stream"); // answer mode固定，降级为DEBUG。
         log.info("[ChatMessage] user id: {}", userId); // 打印当前用户，确认后续历史和 Milvus 检索按用户隔离。
         log.debug("[ChatMessage] raw user message: {}", previewContent(rawUserMessage)); // 用户原文只在DEBUG打印短preview。
@@ -146,6 +157,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         StringBuilder fullAnswer = new StringBuilder(); // 流式 token 先在内存聚合，完成后一次性保存 assistant 消息。
         ToolCallingRequestContext requestContext = new ToolCallingRequestContext(); // 构造工具执行期上下文，只供AiTool读取userId/conversationId。
         requestContext.setTraceId(traceId); // 将本轮traceId传入Tool Calling编排链路。
+        requestContext.setToolsEnabled(!plainChat); // 普通聊天(/chat/plain)关闭工具路由，智能体(/chat/message)保持开启，避免聊天时误触工具调用。
         requestContext.setUserId(userId); // 当前登录用户ID来自后端UserContext，不从前端或模型参数读取。
         requestContext.setConversationId(conversation.getId()); // 当前会话ID用于RAG命中后保存conversation级focus。
         requestContext.setCurrentMessage(modelCurrentMessage); // 当前模型内部消息；只发文件时使用隐藏上下文，不保存到 chat_message。
@@ -155,6 +167,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         requestContext.setProjectFileFocus(projectFileFocus); // 最近成功读取项目源码文件焦点只传相对路径和元信息，不包含文件内容或服务器绝对路径。
         requestContext.setRecentProjectTarget(recentProjectTarget); // 最近明确项目目标优先于 projectFileFocus，不包含文件内容或服务器绝对路径。
         requestContext.setToolCallLogRecorder(buildToolCallLogRecorder()); // 注入日志回调，避免Tech-Brain-Tool模块直接依赖Agent服务。
+        requestContext.setDevActionLogRecorder(buildDevActionLogRecorder()); // 注入开发日志回调，供“保存上一条代码分析结果”使用，同样避免Tool模块反向依赖Agent服务。
         toolCallingChatService.chatStream(modelCurrentMessage, memorySummary, toolHistoryMessages, requestContext, new ToolCallingStreamCallback() { // 传入长期记忆、结构化历史和工具上下文，禁止恢复multiTurnQuestion。
             @Override
             public void onToken(String token) { // 收到最终回答的增量 token。
@@ -673,6 +686,17 @@ public class ChatMessageServiceImpl implements ChatMessageService {
             @Override
             public void markFailed(Long id, String errorMessage, Long durationMs) { // 标记工具执行抛异常。
                 toolCallLogService.markFailed(id, errorMessage, durationMs); // 委托日志服务写入error_message和duration_ms。
+            }
+        };
+    }
+
+    private DevActionLogRecorder buildDevActionLogRecorder() { // 构造跨模块开发日志回调适配器（P5.9）。
+        return new DevActionLogRecorder() { // 匿名实现只负责把Tool模块回调转发到Agent开发日志服务。
+            @Override
+            public DevActionLogSaveResult saveLastCodeAnalysis(Long userId,
+                                                               Long conversationId,
+                                                               String traceId) { // 保存上一条代码分析结果。
+                return devActionLogService.saveLastCodeAnalysisLog(userId, conversationId, traceId); // 委托开发日志服务读取最近一条analyzeCode并落库。
             }
         };
     }

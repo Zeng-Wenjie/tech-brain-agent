@@ -820,13 +820,20 @@ public class CodeTestStepGenerator extends AbstractCodeAnalysisHandler { // P5.8
     }
 
     private String requestExampleForEndpoint(JsonNode result) { // 构造接口请求示例。
-        String endpoint = firstNonBlank(text(result, "endpoint"), text(result, "path"), text(result, "fullPath"),
-                firstEndpointPath(result.path("endpoints")), firstEndpointPath(result.path("backendSseEndpoints"))); // endpoint。
+        String endpoint = firstNonBlank(text(result, "endpoint"),
+                firstEndpointPath(result.path("endpoints")),
+                firstEndpointPath(result.path("backendSseEndpoints")),
+                endpointLikePath(text(result, "path")),
+                endpointLikePath(text(result, "fullPath"))); // 只接受真实 endpoint，不把源码路径误当接口。
         String method = firstNonBlank(text(result, "httpMethod"), firstHttpMethod(result.path("endpoints"))); // HTTP 方法。
         if (endpoint.isBlank()) { // 没有真实 endpoint。
             return ""; // 不生成请求示例，避免捏造。
         }
         return method.isBlank() || "-".equals(method) ? endpoint : method + " " + endpoint; // 只在真实扫描到 HTTP 方法时拼接方法。
+    }
+
+    private String endpointLikePath(String candidate) { // 只保留像接口路径的 path/fullPath。
+        return candidate != null && candidate.startsWith("/") ? candidate : ""; // 源码相对路径不能当 endpoint。
     }
 
     private String requestExampleForTool(String toolName) { // 构造 Tool 调用示例。

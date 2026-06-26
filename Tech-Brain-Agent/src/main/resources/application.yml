@@ -18,7 +18,7 @@ spring:
     redis:
       host: localhost
       port: 6379
-      password: ${REDIS_PASSWORD}
+      password: ${REDIS_PASSWORD:}
       database: 1
       lettuce:
         pool:
@@ -54,7 +54,7 @@ aliyun:
     region: cn-beijing
 
 gemini:
-  api-key: ${GEMINI_API_KEY}
+  api-key: ${GEMINI_API_KEY:}
 
 deepseek:
   api-key: ${DEEPSEEK_API_KEY}

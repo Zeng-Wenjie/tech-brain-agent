@@ -14,7 +14,8 @@ import java.util.Locale; // 统一大小写解析 analysisType。
  * -> analyzeCode 返回统一 code_analysis 外层 JSON。</p>
  *
  * <p>边界说明：本枚举描述 P5.1 到 P5.8 已完成的分析类型（含 RISK 风险点说明和 TEST_STEPS 测试步骤生成）；
- * P5.9 开发日志保存不在当前枚举范围内，避免提前暴露未实现能力。</p>
+ * P5.9 开发日志保存通过 analyzeCode 的 saveToDevLog 参数实现，是分析执行成功后的附加动作，不新增 analysisType，
+ * 因此不在本枚举范围内。</p>
  */
 public enum CodeAnalysisType { // analyzeCode 统一分发使用的分析类型。
     AUTO, // 自动根据参数和路由意图推断分析类型。

@@ -8,5 +8,7 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 public interface ChatMessageService {
 
-    SseEmitter sendMessage(ChatRequestDTO dto);
+    SseEmitter sendMessage(ChatRequestDTO dto); // /chat/message：智能体模式，允许 Tool Calling 工具路由。
+
+    SseEmitter sendMessage(ChatRequestDTO dto, boolean plainChat); // /chat/plain：plainChat=true 时为普通聊天，关闭所有工具，避免误触工具调用。
 }
