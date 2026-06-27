@@ -8,11 +8,16 @@ public class UserContext {
     // 线程本地变量，专门用来存当前登录用户的 ID
     // Thread-local storage for the current logged-in user ID.
      public static final ThreadLocal<Long> USER_THREAD_LOCAL =new ThreadLocal<>();
+     public static final ThreadLocal<String> USERNAME_THREAD_LOCAL = new ThreadLocal<>();
 
      // 设置当前登录用户的 ID
      // Set the current logged-in user ID.
      public static void setUserId(Long userId){
          USER_THREAD_LOCAL.set(userId);
+     }
+
+     public static void setUsername(String username) {
+         USERNAME_THREAD_LOCAL.set(username);
      }
 
      // 获取当前登录用户的 ID
@@ -21,10 +26,15 @@ public class UserContext {
          return USER_THREAD_LOCAL.get();
      }
 
+     public static String getUsername() {
+         return USERNAME_THREAD_LOCAL.get();
+     }
+
      // 删除当前登录用户的 ID
      // Remove the current logged-in user ID.
      public static void removeUserId(){
          USER_THREAD_LOCAL.remove();
+         USERNAME_THREAD_LOCAL.remove();
      }
 
 

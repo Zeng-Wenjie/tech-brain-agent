@@ -17,6 +17,7 @@ public class SelfDevProperties {
 
     private String sandboxWorkspaceDir;
     private List<Long> ownerUserIds = new ArrayList<>();
+    private List<String> ownerUsernames = new ArrayList<>();
     private ClaudeCode claudeCode = new ClaudeCode();
 
     @Data
@@ -24,5 +25,6 @@ public class SelfDevProperties {
         private String executable = "claude";
         private List<String> arguments = new ArrayList<>(List.of("-p"));
         private Integer timeoutSeconds = 900;
+        private Integer authStatusTimeoutSeconds = 15;
     }
 }

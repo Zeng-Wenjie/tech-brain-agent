@@ -127,8 +127,11 @@ techbrain:
   self-dev:
     sandbox-workspace-dir: ${TECHBRAIN_SELF_DEV_SANDBOX:D:/JavaAgent/Tech-Brain-sandbox}
     owner-user-ids: []
+    owner-usernames:
+      - ${TECHBRAIN_SELF_DEV_OWNER_USERNAME:zxx123456}
     claude-code:
       executable: ${CLAUDE_CODE_EXECUTABLE:claude}
       arguments:
         - -p
       timeout-seconds: 900
+      auth-status-timeout-seconds: 15

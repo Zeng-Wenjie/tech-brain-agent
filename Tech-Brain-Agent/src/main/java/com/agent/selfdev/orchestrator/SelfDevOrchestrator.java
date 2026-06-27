@@ -58,7 +58,11 @@ public class SelfDevOrchestrator {
     }
 
     public SelfDevResult execute(SelfDevRequest request, Long userId) {
-        accessGuard.assertOwner(userId);
+        return execute(request, userId, null);
+    }
+
+    public SelfDevResult execute(SelfDevRequest request, Long userId, String username) {
+        accessGuard.assertOwner(userId, username);
         SelfDevRequest safeRequest = request == null ? new SelfDevRequest() : request;
         long startedAt = System.currentTimeMillis();
         SelfDevResult result = new SelfDevResult();

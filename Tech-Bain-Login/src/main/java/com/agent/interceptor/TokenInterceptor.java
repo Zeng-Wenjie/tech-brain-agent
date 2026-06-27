@@ -40,6 +40,7 @@ public class TokenInterceptor implements HandlerInterceptor {
             //获取用户ID,存入ThreadLocal中
             // Store the user ID in ThreadLocal.
             UserContext.setUserId(claims.get("userId", Long.class));
+            UserContext.setUsername(claims.get("username", String.class));
         } catch (Exception e) {
             log.info("token验证失败");
             response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
