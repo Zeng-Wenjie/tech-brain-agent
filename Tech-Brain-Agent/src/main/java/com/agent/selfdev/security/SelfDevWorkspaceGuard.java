@@ -11,7 +11,7 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * 自迭代沙箱 workspace 守卫。
+ * Guard for the sandbox workspace used by Claude Code self-development flows.
  */
 @Component
 public class SelfDevWorkspaceGuard {
@@ -23,15 +23,25 @@ public class SelfDevWorkspaceGuard {
     }
 
     public Path resolveSandboxWorkspace() {
-        String configured = properties.getSandboxWorkspaceDir();
-        if (configured == null || configured.trim().isEmpty()) {
-            throw new IllegalStateException("未配置 techbrain.self-dev.sandbox-workspace-dir。");
-        }
-        Path sandbox = Paths.get(configured.trim()).toAbsolutePath().normalize();
+        Path sandbox = configuredSandboxPath();
         if (!Files.isDirectory(sandbox)) {
-            throw new IllegalStateException("沙箱 workspace 不存在或不是目录：" + sandbox);
+            throw new IllegalStateException("Sandbox workspace does not exist or is not a directory: " + sandbox);
         }
         rejectRuntimeDirectory(sandbox);
+        return sandbox;
+    }
+
+    public Path ensureSandboxWorkspace() {
+        Path sandbox = configuredSandboxPath();
+        rejectRuntimeDirectory(sandbox);
+        try {
+            Files.createDirectories(sandbox);
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to create sandbox workspace: " + sandbox, e);
+        }
+        if (!Files.isDirectory(sandbox)) {
+            throw new IllegalStateException("Sandbox workspace is not a directory: " + sandbox);
+        }
         return sandbox;
     }
 
@@ -39,7 +49,7 @@ public class SelfDevWorkspaceGuard {
         Path sandbox = resolveSandboxWorkspace();
         Path actual = workspace == null ? null : workspace.toAbsolutePath().normalize();
         if (actual == null || !samePath(actual, sandbox)) {
-            throw new IllegalArgumentException("Claude Code 工作目录必须是配置的沙箱 workspace。");
+            throw new IllegalArgumentException("Claude Code working directory must be the configured sandbox workspace.");
         }
     }
 
@@ -69,18 +79,26 @@ public class SelfDevWorkspaceGuard {
             path = path.substring(2);
         }
         if (path.startsWith("/") || path.contains(":") || path.contains("..")) {
-            throw new IllegalArgumentException("允许范围只能使用 workspace 相对路径：" + raw);
+            throw new IllegalArgumentException("Allowed paths must be workspace-relative paths: " + raw);
         }
         if (path.equals(".git") || path.startsWith(".git/")) {
-            throw new IllegalArgumentException("禁止把 .git 加入允许修改范围。");
+            throw new IllegalArgumentException(".git cannot be added to the allowed change scope.");
         }
         return path.endsWith("/") ? path.substring(0, path.length() - 1) : path;
+    }
+
+    private Path configuredSandboxPath() {
+        String configured = properties.getSandboxWorkspaceDir();
+        if (configured == null || configured.trim().isEmpty()) {
+            throw new IllegalStateException("Missing techbrain.self-dev.sandbox-workspace-dir.");
+        }
+        return Paths.get(configured.trim()).toAbsolutePath().normalize();
     }
 
     private void rejectRuntimeDirectory(Path sandbox) {
         Path runtime = Paths.get(System.getProperty("user.dir")).toAbsolutePath().normalize();
         if (samePath(sandbox, runtime) || sandbox.startsWith(runtime) || runtime.startsWith(sandbox)) {
-            throw new IllegalStateException("Claude Code 沙箱不能指向线上运行目录或其父子目录。");
+            throw new IllegalStateException("Claude Code sandbox cannot point to the runtime directory or its parent/child.");
         }
     }
 

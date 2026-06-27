@@ -4,11 +4,14 @@ import com.agent.entity.Result;
 import com.agent.entity.dto.SelfDevCapabilityResult;
 import com.agent.entity.dto.SelfDevClaudeAuthResult;
 import com.agent.entity.dto.SelfDevOwnerBootstrapResult;
+import com.agent.entity.dto.SelfDevProjectImportRequest;
+import com.agent.entity.dto.SelfDevProjectImportResult;
 import com.agent.entity.dto.SelfDevRequest;
 import com.agent.entity.dto.SelfDevResult;
 import com.agent.config.SelfDevProperties;
 import com.agent.selfdev.client.ClaudeCodeClient;
 import com.agent.selfdev.orchestrator.SelfDevOrchestrator;
+import com.agent.selfdev.project.SelfDevProjectImportService;
 import com.agent.selfdev.security.SelfDevAccessGuard;
 import com.agent.selfdev.security.SelfDevWorkspaceGuard;
 import com.agent.utils.UserContext;
@@ -38,17 +41,20 @@ public class SelfDevController {
     private final SelfDevAccessGuard accessGuard;
     private final SelfDevWorkspaceGuard workspaceGuard;
     private final ClaudeCodeClient claudeCodeClient;
+    private final SelfDevProjectImportService projectImportService;
     private final SelfDevProperties properties;
 
     public SelfDevController(SelfDevOrchestrator orchestrator,
                              SelfDevAccessGuard accessGuard,
                              SelfDevWorkspaceGuard workspaceGuard,
                              ClaudeCodeClient claudeCodeClient,
+                             SelfDevProjectImportService projectImportService,
                              SelfDevProperties properties) {
         this.orchestrator = orchestrator;
         this.accessGuard = accessGuard;
         this.workspaceGuard = workspaceGuard;
         this.claudeCodeClient = claudeCodeClient;
+        this.projectImportService = projectImportService;
         this.properties = properties;
     }
 
@@ -131,6 +137,23 @@ public class SelfDevController {
                     .body(Result.error(HttpServletResponse.SC_FORBIDDEN, "OWNER role required."));
         }
         SelfDevClaudeAuthResult result = claudeCodeClient.startAuthLogin();
+        return ResponseEntity.ok(Result.success(result));
+    }
+
+    @Operation(summary = "Import a local project copy into the Claude Code sandbox workspace")
+    @PostMapping("/project/import")
+    public ResponseEntity<Result<SelfDevProjectImportResult>> importProject(@RequestBody(required = false) SelfDevProjectImportRequest request) {
+        Long userId = UserContext.getUserId();
+        if (userId == null) {
+            return ResponseEntity.status(HttpServletResponse.SC_UNAUTHORIZED)
+                    .body(Result.error(HttpServletResponse.SC_UNAUTHORIZED, "Login required."));
+        }
+        String username = UserContext.getUsername();
+        if (!accessGuard.isOwner(userId, username)) {
+            return ResponseEntity.status(HttpServletResponse.SC_FORBIDDEN)
+                    .body(Result.error(HttpServletResponse.SC_FORBIDDEN, "OWNER role required."));
+        }
+        SelfDevProjectImportResult result = projectImportService.importProject(request, userId);
         return ResponseEntity.ok(Result.success(result));
     }
 
