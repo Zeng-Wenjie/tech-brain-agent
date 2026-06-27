@@ -12,9 +12,11 @@ import org.springframework.stereotype.Component;
 public class SelfDevAccessGuard {
 
     private final SelfDevProperties properties;
+    private final SelfDevOwnerStore ownerStore;
 
-    public SelfDevAccessGuard(SelfDevProperties properties) {
+    public SelfDevAccessGuard(SelfDevProperties properties, SelfDevOwnerStore ownerStore) {
         this.properties = properties;
+        this.ownerStore = ownerStore;
     }
 
     public boolean isOwner(Long userId) {
@@ -32,7 +34,21 @@ public class SelfDevAccessGuard {
                 && properties.getOwnerUsernames().stream()
                 .filter(value -> value != null && !value.trim().isEmpty())
                 .anyMatch(value -> value.trim().equalsIgnoreCase(normalizedUsername));
-        return ownerByUserId || ownerByUsername;
+        return ownerByUserId || ownerByUsername || ownerStore.isOwner(userId, username);
+    }
+
+    public boolean hasAnyOwner() {
+        boolean hasConfiguredUserId = properties.getOwnerUserIds() != null && !properties.getOwnerUserIds().isEmpty();
+        boolean hasConfiguredUsername = properties.getOwnerUsernames() != null
+                && properties.getOwnerUsernames().stream().anyMatch(value -> value != null && !value.trim().isEmpty());
+        return hasConfiguredUserId || hasConfiguredUsername || ownerStore.hasOwner();
+    }
+
+    public boolean bootstrapOwner(Long userId, String username) {
+        if (hasAnyOwner()) {
+            return false;
+        }
+        return ownerStore.bootstrapOwner(userId, username);
     }
 
     public void assertOwner(Long userId) {

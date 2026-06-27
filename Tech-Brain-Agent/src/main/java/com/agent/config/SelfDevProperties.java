@@ -18,6 +18,9 @@ public class SelfDevProperties {
     private String sandboxWorkspaceDir;
     private List<Long> ownerUserIds = new ArrayList<>();
     private List<String> ownerUsernames = new ArrayList<>();
+    private String ownerStoreFile = "./data/self-dev-owner.properties";
+    private Boolean ownerBootstrapEnabled = true;
+    private Boolean ownerBootstrapLocalOnly = true;
     private ClaudeCode claudeCode = new ClaudeCode();
 
     @Data

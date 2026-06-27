@@ -3,6 +3,7 @@ package com.agent.controller;
 import com.agent.entity.Result;
 import com.agent.entity.dto.SelfDevCapabilityResult;
 import com.agent.entity.dto.SelfDevClaudeAuthResult;
+import com.agent.entity.dto.SelfDevOwnerBootstrapResult;
 import com.agent.entity.dto.SelfDevRequest;
 import com.agent.entity.dto.SelfDevResult;
 import com.agent.config.SelfDevProperties;
@@ -13,6 +14,7 @@ import com.agent.selfdev.security.SelfDevWorkspaceGuard;
 import com.agent.utils.UserContext;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -52,7 +54,7 @@ public class SelfDevController {
 
     @Operation(summary = "Read current user's Claude Code capability")
     @GetMapping("/capability")
-    public ResponseEntity<Result<SelfDevCapabilityResult>> capability() {
+    public ResponseEntity<Result<SelfDevCapabilityResult>> capability(HttpServletRequest request) {
         Long userId = UserContext.getUserId();
         if (userId == null) {
             return ResponseEntity.status(HttpServletResponse.SC_UNAUTHORIZED)
@@ -62,6 +64,8 @@ public class SelfDevController {
         SelfDevCapabilityResult result = new SelfDevCapabilityResult();
         boolean owner = accessGuard.isOwner(userId, username);
         result.setOwner(owner);
+        result.setOwnerConfigured(accessGuard.hasAnyOwner());
+        result.setOwnerBootstrapAvailable(canBootstrapOwner(request));
         result.setCurrentUserId(userId);
         result.setCurrentUsername(username);
         try {
@@ -76,6 +80,40 @@ public class SelfDevController {
         }
         SelfDevClaudeAuthResult authResult = claudeCodeClient.readAuthStatus(resolveAuthStatusTimeout());
         fillClaudeAuth(result, authResult);
+        return ResponseEntity.ok(Result.success(result));
+    }
+
+    @Operation(summary = "Bootstrap the first self-dev OWNER")
+    @PostMapping("/owner/bootstrap")
+    public ResponseEntity<Result<SelfDevOwnerBootstrapResult>> bootstrapOwner(HttpServletRequest request) {
+        Long userId = UserContext.getUserId();
+        String username = UserContext.getUsername();
+        if (userId == null) {
+            return ResponseEntity.status(HttpServletResponse.SC_UNAUTHORIZED)
+                    .body(Result.error(HttpServletResponse.SC_UNAUTHORIZED, "Login required."));
+        }
+        SelfDevOwnerBootstrapResult result = new SelfDevOwnerBootstrapResult();
+        result.setUserId(userId);
+        result.setUsername(username);
+        if (!Boolean.TRUE.equals(properties.getOwnerBootstrapEnabled())) {
+            result.setSuccess(false);
+            result.setMessage("OWNER 初始化未开启。");
+            return ResponseEntity.ok(Result.success(result));
+        }
+        if (Boolean.TRUE.equals(properties.getOwnerBootstrapLocalOnly()) && !isLocalRequest(request)) {
+            return ResponseEntity.status(HttpServletResponse.SC_FORBIDDEN)
+                    .body(Result.error(HttpServletResponse.SC_FORBIDDEN, "OWNER bootstrap only allows local requests."));
+        }
+        if (accessGuard.hasAnyOwner()) {
+            result.setOwner(accessGuard.isOwner(userId, username));
+            result.setSuccess(result.isOwner());
+            result.setMessage(result.isOwner() ? "当前账号已经是 OWNER。" : "系统已经存在 OWNER，不能重复初始化。");
+            return ResponseEntity.ok(Result.success(result));
+        }
+        boolean bootstrapped = accessGuard.bootstrapOwner(userId, username);
+        result.setSuccess(bootstrapped);
+        result.setOwner(accessGuard.isOwner(userId, username));
+        result.setMessage(bootstrapped ? "已将当前账号设为 OWNER。" : "OWNER 初始化失败。");
         return ResponseEntity.ok(Result.success(result));
     }
 
@@ -131,6 +169,24 @@ public class SelfDevController {
         target.setClaudeCodeLoginCommand("claude auth login");
         String output = firstNonBlank(source.getStdout(), source.getStderr(), source.getErrorMessage());
         target.setClaudeCodeAuthOutput(output);
+    }
+
+    private boolean canBootstrapOwner(HttpServletRequest request) {
+        if (accessGuard.hasAnyOwner() || !Boolean.TRUE.equals(properties.getOwnerBootstrapEnabled())) {
+            return false;
+        }
+        return !Boolean.TRUE.equals(properties.getOwnerBootstrapLocalOnly()) || isLocalRequest(request);
+    }
+
+    private boolean isLocalRequest(HttpServletRequest request) {
+        if (request == null) {
+            return false;
+        }
+        String remoteAddr = request.getRemoteAddr();
+        return "127.0.0.1".equals(remoteAddr)
+                || "0:0:0:0:0:0:0:1".equals(remoteAddr)
+                || "::1".equals(remoteAddr)
+                || "localhost".equalsIgnoreCase(remoteAddr);
     }
 
     private String firstNonBlank(String... values) {

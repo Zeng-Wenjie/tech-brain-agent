@@ -9,6 +9,8 @@ import lombok.Data;
 public class SelfDevCapabilityResult {
 
     private boolean owner;
+    private boolean ownerConfigured;
+    private boolean ownerBootstrapAvailable;
     private boolean sandboxConfigured;
     private boolean claudeCodeAvailable;
     private boolean claudeCodeAuthenticated;

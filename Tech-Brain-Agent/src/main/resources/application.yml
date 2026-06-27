@@ -127,8 +127,10 @@ techbrain:
   self-dev:
     sandbox-workspace-dir: ${TECHBRAIN_SELF_DEV_SANDBOX:D:/JavaAgent/Tech-Brain-sandbox}
     owner-user-ids: []
-    owner-usernames:
-      - ${TECHBRAIN_SELF_DEV_OWNER_USERNAME:zxx123456}
+    owner-usernames: []
+    owner-store-file: ${TECHBRAIN_SELF_DEV_OWNER_STORE:./data/self-dev-owner.properties}
+    owner-bootstrap-enabled: ${TECHBRAIN_SELF_DEV_OWNER_BOOTSTRAP_ENABLED:true}
+    owner-bootstrap-local-only: true
     claude-code:
       executable: ${CLAUDE_CODE_EXECUTABLE:claude}
       arguments:
