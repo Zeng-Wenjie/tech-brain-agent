@@ -1,3 +1,7 @@
+# 后端服务端口：默认 8081（原 8080 在本机会被 WSL2/Hyper-V 动态保留导致无法绑定）；可用 SERVER_PORT 环境变量覆盖。
+server:
+  port: ${SERVER_PORT:8081}
+
 #配置Mysql
 spring:
   application:
@@ -57,7 +61,7 @@ gemini:
   api-key: ${GEMINI_API_KEY:}
 
 deepseek:
-  api-key: ${DEEPSEEK_API_KEY}
+  api-key: ${DEEPSEEK_API_KEY:}
   base-url: https://api.deepseek.com/v1
   model-name: deepseek-v4-pro
   temperature: 0.7

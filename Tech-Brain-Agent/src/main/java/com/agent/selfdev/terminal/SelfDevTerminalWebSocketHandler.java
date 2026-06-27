@@ -57,7 +57,7 @@ public class SelfDevTerminalWebSocketHandler extends TextWebSocketHandler {
     private final SelfDevWorkspaceGuard workspaceGuard;
     private final WorkspaceDiffService diffService;
     private final DevActionLogService devActionLogService;
-    private final ObjectMapper objectMapper;
+    private final ObjectMapper objectMapper = new ObjectMapper();
     private final ExecutorService executorService = Executors.newCachedThreadPool();
     private final Map<String, TerminalSessionState> sessions = new ConcurrentHashMap<>();
 
@@ -65,14 +65,12 @@ public class SelfDevTerminalWebSocketHandler extends TextWebSocketHandler {
                                            SelfDevAccessGuard accessGuard,
                                            SelfDevWorkspaceGuard workspaceGuard,
                                            WorkspaceDiffService diffService,
-                                           DevActionLogService devActionLogService,
-                                           ObjectMapper objectMapper) {
+                                           DevActionLogService devActionLogService) {
         this.properties = properties;
         this.accessGuard = accessGuard;
         this.workspaceGuard = workspaceGuard;
         this.diffService = diffService;
         this.devActionLogService = devActionLogService;
-        this.objectMapper = objectMapper;
     }
 
     @Override
