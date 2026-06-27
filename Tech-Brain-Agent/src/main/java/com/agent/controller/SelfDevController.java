@@ -19,15 +19,19 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.List;
 
 /**
  * HTTP entry for the sandbox-only Claude Code self-development flow.
@@ -154,6 +158,26 @@ public class SelfDevController {
                     .body(Result.error(HttpServletResponse.SC_FORBIDDEN, "OWNER role required."));
         }
         SelfDevProjectImportResult result = projectImportService.importProject(request, userId);
+        return ResponseEntity.ok(Result.success(result));
+    }
+
+    @Operation(summary = "Upload a browser-selected local project folder into the Claude Code sandbox workspace")
+    @PostMapping(value = "/project/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<Result<SelfDevProjectImportResult>> uploadProject(@RequestParam("files") List<MultipartFile> files,
+                                                                            @RequestParam("paths") List<String> paths,
+                                                                            @RequestParam(value = "projectName", required = false) String projectName,
+                                                                            @RequestParam(value = "overwrite", defaultValue = "false") boolean overwrite) {
+        Long userId = UserContext.getUserId();
+        if (userId == null) {
+            return ResponseEntity.status(HttpServletResponse.SC_UNAUTHORIZED)
+                    .body(Result.error(HttpServletResponse.SC_UNAUTHORIZED, "Login required."));
+        }
+        String username = UserContext.getUsername();
+        if (!accessGuard.isOwner(userId, username)) {
+            return ResponseEntity.status(HttpServletResponse.SC_FORBIDDEN)
+                    .body(Result.error(HttpServletResponse.SC_FORBIDDEN, "OWNER role required."));
+        }
+        SelfDevProjectImportResult result = projectImportService.importUploadedProject(files, paths, projectName, overwrite, userId);
         return ResponseEntity.ok(Result.success(result));
     }
 
