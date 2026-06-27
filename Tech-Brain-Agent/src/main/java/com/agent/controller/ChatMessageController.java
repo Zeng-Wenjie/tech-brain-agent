@@ -21,7 +21,7 @@ public class ChatMessageController {
     @Operation(summary = "发送会话消息（智能体模式，含工具调用）")
     @PostMapping(value = "/chat/message", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter sendMessage(@RequestBody ChatRequestDTO dto) {
-        return chatMessageService.sendMessage(dto); // 智能体模式：允许 Tool Calling 工具路由（ragSearch/analyzeCode/searchCode 等）。
+        return chatMessageService.sendMessage(dto); // 智能体模式：允许保留的 Tool Calling 工具路由（ragSearch/readFile/summarizeArticle）。
     }
 
     @Operation(summary = "发送普通会话消息（纯聊天，不调用任何工具）")

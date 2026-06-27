@@ -9,7 +9,7 @@ import lombok.Data;
  * 让“代码分析（P5.9）”以及后续 P7-P14（修改方案/patch/文件修改/编译/回滚）各类行为都通过同一个入口落库，
  * 为 P17 记忆召回、P18 记忆质量筛选提前准备 intent / result / targetModule / targetFile / relatedBugId 等字段。</p>
  *
- * <p>调用链：AnalyzeCodeTool 或 DevActionLogService.recordCodeAnalysis 等先构造本对象（多数字段可空，由 Service 兜底/推断），
+ * <p>调用链：SelfDevOrchestrator 或后续沙箱/验证/回滚流程先构造本对象（多数字段可空，由 Service 兜底/推断），
  * 再调用 saveDevAction 完成 intent/summary/targetModule 自动补全、路径脱敏、长度控制后写入 dev_action_log。</p>
  *
  * <p>边界说明：本对象是内部 Service DTO，不是前端接口请求体，不暴露 Controller；
@@ -25,7 +25,7 @@ public class DevActionLogCreateRequest { // 开发行为日志统一保存入参
     private String actionType;    // 开发行为类型，对应 DevActionType；为空时默认 CODE_ANALYSIS。
     private String intent;        // 行为意图（为什么做）；为空时 Service 按 analysisType/target 自动生成。
     private String result;        // 行为结果质量，对应 DevActionResult；为空时默认 SUCCESS。
-    private String analysisType;  // analyzeCode 的 analysisType（RISK/TEST_STEPS/...），可空。
+    private String analysisType;  // 历史分析类型，可空；Claude Code 新链路通常不使用。
     private String targetType;    // 目标类型，对应 DevTargetType；为空时由 Service 推断。
     private String targetModule;  // 目标模块（如 Tech-Brain-Agent）；为空时由 Service 从 targetFile/targetPath 推断。
     private String targetFile;    // 目标文件 workspace 相对路径（P17 召回优先用）；与 targetPath 互相兜底。

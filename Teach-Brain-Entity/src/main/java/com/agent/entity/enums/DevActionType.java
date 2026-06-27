@@ -4,17 +4,17 @@ package com.agent.entity.enums;
  * 开发行为类型枚举（P6.1 语义化开发日志）。
  *
  * <p>适用场景：标记一条 dev_action_log 属于哪一类开发行为，写入 dev_action_log.action_type。
- * P6.1 实际只接 {@link #CODE_ANALYSIS}（analyzeCode 分析结果保存，对应 P5.9）；其余取值是为 P7-P14
- * （修改方案 / patch / 文件修改 / 编译 / 前端构建 / 发布确认 / 回滚）预留的语义占位，本步骤不接入真实流程。</p>
+ * Claude Code 沙箱执行、修改方案 / patch / 文件修改 / 编译 / 前端构建 / 发布确认 / 回滚等流程都会写入本枚举值。</p>
  *
- * <p>调用链：DevActionLogService.saveDevAction / recordCodeAnalysis 等在构造 DevActionLog 时写入 action_type；
+ * <p>调用链：DevActionLogService.saveDevAction 或各类 record* 方法在构造 DevActionLog 时写入 action_type；
  * 后续 P17 记忆召回可按 action_type 过滤“分析类 / 修改类 / 验证类”行为。</p>
  *
  * <p>边界说明：本枚举只描述行为类别，不代表行为结果质量（结果质量见 {@link DevActionResult}），
  * 也不代表日志保存状态（见 {@link DevActionStatus}）。</p>
  */
 public enum DevActionType { // 开发行为类型。
-    CODE_ANALYSIS,            // 代码分析（P5.9 已接入：结构/调用链/风险/测试步骤/说明等统一归类）。
+    CLAUDE_CODE_EXECUTED,     // Claude Code 沙箱开发执行。
+    CODE_ANALYSIS,            // 历史代码分析类型，保留兼容已有数据。
     CHANGE_PLAN_GENERATED,    // 生成修改方案（P7 预留）。
     PATCH_GENERATED,          // 生成 patch（P8 预留）。
     FILE_MODIFIED,            // 文件修改（P10 预留）。

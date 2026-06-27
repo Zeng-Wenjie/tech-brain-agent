@@ -12,7 +12,6 @@ import com.agent.mapper.ConversationMapper;
 import com.agent.service.ChatMessageFileService;
 import com.agent.service.ChatMessageService;
 import com.agent.service.ConversationMemoryService;
-import com.agent.service.DevActionLogService;
 import com.agent.service.ToolCallLogService;
 import com.agent.service.UserFileService;
 import com.agent.toolcalling.context.ChatAttachedFileContext;
@@ -22,8 +21,6 @@ import com.agent.toolcalling.core.ToolChatHistoryMessage;
 import com.agent.toolcalling.core.ToolCallingChatService;
 import com.agent.toolcalling.core.ToolCallingStreamCallback;
 import com.agent.toolcalling.context.ToolCallingRequestContext;
-import com.agent.toolcalling.devlog.DevActionLogRecorder;
-import com.agent.toolcalling.devlog.DevActionLogSaveResult;
 import com.agent.toolcalling.log.ToolCallLogRecorder;
 import com.agent.utils.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
@@ -81,9 +78,6 @@ public class ChatMessageServiceImpl implements ChatMessageService {
 
     @Autowired
     private ToolCallLogService toolCallLogService; // 工具调用日志服务，只用于tool_call_log记录和final_answer回填。
-
-    @Autowired
-    private DevActionLogService devActionLogService; // 开发行为日志服务，只用于P5.9保存代码分析结果到dev_action_log。
 
     @Autowired
     private ConversationMemoryService conversationMemoryService; // assistant 回复完成后异步线程内更新 conversation_memory 长期记忆。
@@ -148,8 +142,6 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         chatMessageFileService.saveMessageFiles(userMessageId, conversation.getId(), userId, attachedUserFiles); // 写入 chat_message_file，仅保存附件元信息。
         List<ChatAttachedFileContext> recentAttachedFiles = loadRecentAttachedFiles(conversation.getId(), userId); // 加载当前会话最近附件，供“这个文件/继续分析”指代解析。
         ChatAttachedFileContext activeFileFocus = loadActiveFileFocus(conversation.getId(), userId); // 加载最近成功readFile的上传文件焦点，优先处理上传附件指代。
-        ConversationFocusContext projectFileFocus = loadProjectFileFocus(conversation.getId(), userId); // 加载最近成功readProjectFile的项目源码文件焦点，处理“给我代码/继续分析”等指代。
-        ConversationFocusContext recentProjectTarget = loadRecentProjectTarget(conversation.getId(), userId); // 加载最近一次 searchCode/readProjectFile/analyzeCode 明确定位到的项目目标，优先处理“它/这个类”指代。
 
         log.debug("[ChatMessage] use ToolCallingChatService.chatStream: true"); // 调用细节降级为DEBUG。
         log.debug("[ChatMessage] tool-calling current message: {}", previewContent(modelCurrentMessage)); // 模型内部消息只在DEBUG打印短preview。
@@ -164,10 +156,7 @@ public class ChatMessageServiceImpl implements ChatMessageService {
         requestContext.setAttachedFiles(attachedFiles); // 本轮附件只传安全元信息，不包含 storagePath 或文件内容。
         requestContext.setRecentAttachedFiles(recentAttachedFiles); // 最近附件只传安全元信息，用于会话文件焦点记忆。
         requestContext.setActiveFileFocus(activeFileFocus); // 最近成功读取文件焦点只传元信息，用于多附件场景的模糊指代解析。
-        requestContext.setProjectFileFocus(projectFileFocus); // 最近成功读取项目源码文件焦点只传相对路径和元信息，不包含文件内容或服务器绝对路径。
-        requestContext.setRecentProjectTarget(recentProjectTarget); // 最近明确项目目标优先于 projectFileFocus，不包含文件内容或服务器绝对路径。
         requestContext.setToolCallLogRecorder(buildToolCallLogRecorder()); // 注入日志回调，避免Tech-Brain-Tool模块直接依赖Agent服务。
-        requestContext.setDevActionLogRecorder(buildDevActionLogRecorder()); // 注入开发日志回调，供“保存上一条代码分析结果”使用，同样避免Tool模块反向依赖Agent服务。
         toolCallingChatService.chatStream(modelCurrentMessage, memorySummary, toolHistoryMessages, requestContext, new ToolCallingStreamCallback() { // 传入长期记忆、结构化历史和工具上下文，禁止恢复multiTurnQuestion。
             @Override
             public void onToken(String token) { // 收到最终回答的增量 token。
@@ -357,42 +346,6 @@ public class ChatMessageServiceImpl implements ChatMessageService {
             return context; // 返回activeFileFocus元信息。
         } catch (Exception e) {
             log.warn("[ChatMessage] load active file focus failed, conversationId: {}, userId: {}",
-                    conversationId, userId, e); // 读取失败不能影响聊天主流程。
-            return null; // 兜底为空。
-        }
-    }
-
-    private ConversationFocusContext loadProjectFileFocus(Long conversationId, Long userId) {
-        if (conversationId == null || userId == null) { // 缺少会话或用户时不能读取 projectFileFocus。
-            return null; // 返回空焦点。
-        }
-        try {
-            ConversationFocusContext focus = conversationFocusService.getProjectFileFocus(userId, conversationId); // 按当前用户和会话读取最近成功 readProjectFile 的项目源码焦点。
-            if (focus == null || focus.getPath() == null || focus.getPath().isBlank()) { // 没有项目文件焦点。
-                return null; // 返回空焦点。
-            }
-            log.debug("[ChatMessage] project file focus loaded, path: {}", focus.getPath()); // 只打印 workspace 相对路径，不打印绝对路径或文件内容。
-            return focus; // 返回 projectFileFocus 元信息。
-        } catch (Exception e) {
-            log.warn("[ChatMessage] load project file focus failed, conversationId: {}, userId: {}",
-                    conversationId, userId, e); // 读取失败不能影响聊天主流程。
-            return null; // 兜底为空。
-        }
-    }
-
-    private ConversationFocusContext loadRecentProjectTarget(Long conversationId, Long userId) {
-        if (conversationId == null || userId == null) { // 缺少会话或用户时不能读取 recentProjectTarget。
-            return null; // 返回空目标。
-        }
-        try {
-            ConversationFocusContext target = conversationFocusService.getRecentProjectTarget(userId, conversationId); // 按当前用户和会话读取最近明确项目目标。
-            if (target == null || target.getPath() == null || target.getPath().isBlank()) { // 没有最近项目目标。
-                return null; // 返回空目标。
-            }
-            log.debug("[ChatMessage] recent project target loaded, path: {}", target.getPath()); // 只打印 workspace 相对路径，不打印绝对路径或文件内容。
-            return target; // 返回 recentProjectTarget 元信息。
-        } catch (Exception e) {
-            log.warn("[ChatMessage] load recent project target failed, conversationId: {}, userId: {}",
                     conversationId, userId, e); // 读取失败不能影响聊天主流程。
             return null; // 兜底为空。
         }
@@ -686,17 +639,6 @@ public class ChatMessageServiceImpl implements ChatMessageService {
             @Override
             public void markFailed(Long id, String errorMessage, Long durationMs) { // 标记工具执行抛异常。
                 toolCallLogService.markFailed(id, errorMessage, durationMs); // 委托日志服务写入error_message和duration_ms。
-            }
-        };
-    }
-
-    private DevActionLogRecorder buildDevActionLogRecorder() { // 构造跨模块开发日志回调适配器（P5.9）。
-        return new DevActionLogRecorder() { // 匿名实现只负责把Tool模块回调转发到Agent开发日志服务。
-            @Override
-            public DevActionLogSaveResult saveLastCodeAnalysis(Long userId,
-                                                               Long conversationId,
-                                                               String traceId) { // 保存上一条代码分析结果。
-                return devActionLogService.saveLastCodeAnalysisLog(userId, conversationId, traceId); // 委托开发日志服务读取最近一条analyzeCode并落库。
             }
         };
     }
