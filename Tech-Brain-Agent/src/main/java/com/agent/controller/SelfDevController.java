@@ -77,9 +77,6 @@ public class SelfDevController {
                     .body(Result.error(HttpServletResponse.SC_FORBIDDEN, "OWNER role required."));
         }
         SelfDevResult result = orchestrator.execute(request, userId);
-        int status = result.isSuccess() || result.isRejected()
-                ? HttpServletResponse.SC_OK
-                : HttpServletResponse.SC_BAD_REQUEST;
-        return ResponseEntity.status(status).body(Result.success(result));
+        return ResponseEntity.ok(Result.success(result));
     }
 }
