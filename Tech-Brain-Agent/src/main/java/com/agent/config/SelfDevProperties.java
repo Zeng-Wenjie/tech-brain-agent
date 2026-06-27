@@ -27,6 +27,7 @@ public class SelfDevProperties {
     public static class ClaudeCode {
         private String executable = "claude";
         private List<String> arguments = new ArrayList<>(List.of("-p"));
+        private List<String> terminalArguments = new ArrayList<>();
         private Integer timeoutSeconds = 900;
         private Integer authStatusTimeoutSeconds = 15;
     }
