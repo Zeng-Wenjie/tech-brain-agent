@@ -24,6 +24,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -49,6 +50,7 @@ public class AgentServiceImpl extends ServiceImpl<AgentMapper, Article> implemen
     private EmbeddingModel embeddingModel; // 将用户问题转成向量，供 Milvus 做语义相似度检索。
 
     @Autowired
+    @Lazy // 注入懒加载代理：配合 VectorStoreConfig 的 @Lazy Bean，首次检索时才真正连接 Milvus，后端启动不再等待 Milvus。
     private EmbeddingStore<TextSegment> embeddingStore; // Milvus 向量库入口，存放文章向量和用于 RAG 的元数据。
 
     @Autowired

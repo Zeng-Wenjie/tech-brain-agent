@@ -7,6 +7,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
@@ -36,7 +37,7 @@ public class ClaudeCodeClient {
     }
 
     public ClaudeCodeResult run(Path workspace, String prompt, Duration timeout) {
-        workspaceGuard.assertSandboxWorkspace(workspace);
+        workspaceGuard.assertProjectWorkspace(workspace);
         long start = System.currentTimeMillis();
         ClaudeCodeResult result = new ClaudeCodeResult();
         Process process = null;
@@ -147,7 +148,7 @@ public class ClaudeCodeClient {
     private List<String> buildCommand(String prompt) {
         SelfDevProperties.ClaudeCode claudeCode = properties.getClaudeCode();
         List<String> command = new ArrayList<>();
-        command.add(claudeCode.getExecutable());
+        command.add(resolveExecutable());
         if (claudeCode.getArguments() != null) {
             command.addAll(claudeCode.getArguments());
         }
@@ -156,14 +157,55 @@ public class ClaudeCodeClient {
     }
 
     private List<String> buildAuthCommand(String... arguments) {
-        SelfDevProperties.ClaudeCode claudeCode = properties.getClaudeCode();
         List<String> command = new ArrayList<>();
-        command.add(claudeCode.getExecutable());
+        command.add(resolveExecutable());
         command.add("auth");
         if (arguments != null) {
             command.addAll(List.of(arguments));
         }
         return command;
+    }
+
+    /**
+     * 解析 Claude Code 可执行文件路径。
+     *
+     * <p>Windows 下 ProcessBuilder 不会按 PATHEXT 自动补 .cmd，直接用裸名 "claude" 会抛 ENOENT，
+     * 导致能力检测（readAuthStatus）把 Claude 误判为 unavailable。这里在 Windows 下把裸名解析成 PATH 中的
+     * claude.cmd/.exe/.bat 全路径，让 ProcessBuilder 直接拉起，不再依赖 CLAUDE_CODE_EXECUTABLE 环境变量。
+     * 已带路径或扩展名的配置值原样使用。</p>
+     */
+    private String resolveExecutable() {
+        SelfDevProperties.ClaudeCode claudeCode = properties.getClaudeCode();
+        String configured = claudeCode == null || claudeCode.getExecutable() == null || claudeCode.getExecutable().trim().isEmpty()
+                ? "claude"
+                : claudeCode.getExecutable().trim();
+        if (configured.contains("/") || configured.contains("\\") || configured.contains(".")) {
+            return configured; // 已是具体文件（带路径或扩展名），直接用。
+        }
+        if (!isWindows()) {
+            return configured; // 非 Windows 由系统按 PATH 解析裸名即可。
+        }
+        String pathEnv = System.getenv("PATH");
+        if (pathEnv == null || pathEnv.isEmpty()) {
+            return configured;
+        }
+        String[] extensions = {".cmd", ".exe", ".bat"};
+        for (String dir : pathEnv.split(File.pathSeparator)) {
+            if (dir == null || dir.trim().isEmpty()) {
+                continue;
+            }
+            for (String ext : extensions) {
+                File candidate = new File(dir.trim(), configured + ext);
+                if (candidate.isFile()) {
+                    return candidate.getAbsolutePath(); // 解析到 PATH 中的 claude.cmd 全路径。
+                }
+            }
+        }
+        return configured; // PATH 中找不到时回退裸名，行为与改动前一致。
+    }
+
+    private boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
     }
 
     private List<String> buildLoginLauncher(List<String> command) {

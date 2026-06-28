@@ -130,8 +130,7 @@ public class SelfDevTerminalWebSocketHandler extends TextWebSocketHandler {
         String username = getStringAttribute(session, SelfDevTerminalHandshakeInterceptor.ATTR_USERNAME);
         accessGuard.assertOwner(userId, username);
 
-        Path sandbox = workspaceGuard.resolveSandboxWorkspace();
-        workspaceGuard.assertSandboxWorkspace(sandbox);
+        Path workspace = resolveProjectWorkspace(payload.path("project").asText(null));
         List<String> allowedPaths = readAllowedPaths(payload.path("allowedPaths"));
         if (allowedPaths.isEmpty()) {
             allowedPaths = List.of(".");
@@ -143,7 +142,7 @@ public class SelfDevTerminalWebSocketHandler extends TextWebSocketHandler {
         Map<String, String> environment = buildEnvironment();
 
         PtyProcess process = new PtyProcessBuilder(command.toArray(new String[0]))
-                .setDirectory(sandbox.toString())
+                .setDirectory(workspace.toString())
                 .setEnvironment(environment)
                 .setInitialColumns(cols)
                 .setInitialRows(rows)
@@ -153,7 +152,7 @@ public class SelfDevTerminalWebSocketHandler extends TextWebSocketHandler {
                 .start();
 
         state.process = process;
-        state.workspace = sandbox;
+        state.workspace = workspace;
         state.command = command;
         state.allowedPaths = allowedPaths;
         state.intent = textOrDefault(payload.path("intent").asText(null), "Claude Code terminal session");
@@ -161,7 +160,7 @@ public class SelfDevTerminalWebSocketHandler extends TextWebSocketHandler {
         state.traceId = UUID.randomUUID().toString();
 
         send(session, "started", Map.of(
-                "cwd", sandbox.toString(),
+                "cwd", workspace.toString(),
                 "command", displayCommand(command),
                 "traceId", state.traceId
         ));
@@ -315,6 +314,23 @@ public class SelfDevTerminalWebSocketHandler extends TextWebSocketHandler {
         List<String> raw = new ArrayList<>();
         node.forEach(item -> raw.add(item.asText()));
         return workspaceGuard.sanitizeAllowedPaths(raw);
+    }
+
+    /**
+     * 把前端传来的 project 解析成沙箱下的项目工作目录；为空时若沙箱里仅有一个项目则用它，否则提示先选/先导入。
+     */
+    private Path resolveProjectWorkspace(String project) {
+        if (project != null && !project.trim().isEmpty()) {
+            return workspaceGuard.resolveProjectWorkspace(project.trim());
+        }
+        List<String> projects = workspaceGuard.listProjects();
+        if (projects.size() == 1) {
+            return workspaceGuard.resolveProjectWorkspace(projects.get(0));
+        }
+        if (projects.isEmpty()) {
+            throw new IllegalStateException("沙箱里还没有项目，请先在左侧导入一个项目。");
+        }
+        throw new IllegalArgumentException("请先在左侧选择要操作的项目。");
     }
 
     private Long saveDevActionLog(TerminalSessionState state,

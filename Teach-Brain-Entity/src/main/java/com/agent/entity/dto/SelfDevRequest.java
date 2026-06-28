@@ -13,6 +13,7 @@ public class SelfDevRequest {
 
     private String intent;
     private String requirement;
+    private String project;                 // 沙箱下要操作的项目名（sandbox/<project>）；为空时若仅有一个项目则用它。
     private List<String> allowedPaths = new ArrayList<>();
     private String moduleScope;
     private String projectConventions;

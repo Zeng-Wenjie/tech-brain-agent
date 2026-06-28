@@ -69,7 +69,7 @@ public class SelfDevOrchestrator {
         result.setIntent(blankToDefault(safeRequest.getIntent(), "Claude Code sandbox development"));
         try {
             validateRequest(safeRequest);
-            Path sandbox = workspaceGuard.resolveSandboxWorkspace();
+            Path workspace = workspaceGuard.resolveProjectWorkspace(safeRequest.getProject());
             List<String> allowedPaths = workspaceGuard.sanitizeAllowedPaths(safeRequest.getAllowedPaths());
             if (allowedPaths.isEmpty()) {
                 throw new IllegalArgumentException("At least one allowed path is required.");
@@ -78,10 +78,10 @@ public class SelfDevOrchestrator {
             String prompt = buildPrompt(safeRequest, allowedPaths);
             result.setPrompt(prompt);
 
-            ClaudeCodeResult claudeResult = claudeCodeClient.run(sandbox, prompt, resolveTimeout(safeRequest));
+            ClaudeCodeResult claudeResult = claudeCodeClient.run(workspace, prompt, resolveTimeout(safeRequest));
             copyClaudeResult(result, claudeResult);
 
-            WorkspaceDiffResult diffResult = diffService.collect(sandbox);
+            WorkspaceDiffResult diffResult = diffService.collect(workspace);
             result.setChangedFiles(diffResult.getChangedFiles());
             result.setDiff(limitText(diffResult.getDiff(), DISPLAY_TEXT_LIMIT));
 

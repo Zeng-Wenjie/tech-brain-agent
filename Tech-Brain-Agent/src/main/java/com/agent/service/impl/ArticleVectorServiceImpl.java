@@ -11,6 +11,7 @@ import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.store.embedding.EmbeddingStore;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
@@ -29,6 +30,7 @@ public class ArticleVectorServiceImpl implements ArticleVectorService {
     private EmbeddingModel embeddingModel; // 文章标题和内容先转 embedding，再写入 Milvus。
 
     @Autowired
+    @Lazy // 注入懒加载代理：配合 VectorStoreConfig 的 @Lazy Bean，首次写向量时才真正连接 Milvus，后端启动不再等待 Milvus。
     private EmbeddingStore<TextSegment> embeddingStore; // Milvus 是可重建的向量索引，不作为文章主数据源。
 
     @Autowired

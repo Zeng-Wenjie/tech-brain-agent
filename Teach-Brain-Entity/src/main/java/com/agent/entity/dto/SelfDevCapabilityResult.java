@@ -2,6 +2,8 @@ package com.agent.entity.dto;
 
 import lombok.Data;
 
+import java.util.List;
+
 /**
  * Capability state for the Claude Code self-development entry.
  */
@@ -17,6 +19,7 @@ public class SelfDevCapabilityResult {
     private Long currentUserId;
     private String currentUsername;
     private String sandboxWorkspaceDir;
+    private List<String> availableProjects;
     private String claudeCodeLoginCommand;
     private String claudeCodeAuthOutput;
     private String message;

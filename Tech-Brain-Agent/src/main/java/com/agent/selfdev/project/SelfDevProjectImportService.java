@@ -62,26 +62,32 @@ public class SelfDevProjectImportService {
         boolean overwrite = request != null && Boolean.TRUE.equals(request.getOverwrite());
         try {
             Path source = resolveSourcePath(request);
-            String projectName = source.getFileName() == null ? source.toString() : source.getFileName().toString();
+            String projectName = workspaceGuard.sanitizeProjectName(
+                    source.getFileName() == null ? source.toString() : source.getFileName().toString());
             Path sandbox = workspaceGuard.ensureSandboxWorkspace();
             Path realSource = source.toRealPath();
             Path realSandbox = sandbox.toRealPath();
             rejectOverlappingPaths(realSource, realSandbox);
+            Path projectDir = realSandbox.resolve(projectName).normalize();
+            if (projectDir.getParent() == null || !projectDir.getParent().equals(realSandbox)) {
+                throw new IllegalArgumentException("Resolved project directory escapes the sandbox: " + projectName);
+            }
 
             result.setProjectName(projectName);
             result.setSandboxWorkspaceDir(realSandbox.toString());
-            if (!isDirectoryEmpty(realSandbox)) {
+            if (Files.isDirectory(projectDir) && !isDirectoryEmpty(projectDir)) {
                 if (!overwrite) {
                     result.setSuccess(false);
-                    result.setMessage("Sandbox workspace is not empty. Enable overwrite to replace it.");
+                    result.setMessage("Project \"" + projectName + "\" already exists in the sandbox. Enable overwrite to replace it.");
                     saveLog(userId, traceId, result, overwrite, null);
                     return result;
                 }
-                clearDirectory(realSandbox);
+                clearDirectory(projectDir);
             }
+            Files.createDirectories(projectDir);
 
-            CopyStats stats = copyProjectContents(realSource, realSandbox);
-            ensureGitBaseline(realSandbox);
+            CopyStats stats = copyProjectContents(realSource, projectDir);
+            ensureGitBaseline(projectDir);
             result.setSuccess(true);
             result.setFileCount(stats.fileCount);
             result.setDirectoryCount(stats.directoryCount);
@@ -107,23 +113,29 @@ public class SelfDevProjectImportService {
         String traceId = UUID.randomUUID().toString();
         try {
             List<UploadEntry> entries = normalizeUploadEntries(files, relativePaths);
-            String resolvedProjectName = firstNonBlank(sanitizeProjectName(projectName), deriveProjectName(entries));
+            String resolvedProjectName = workspaceGuard.sanitizeProjectName(
+                    firstNonBlank(sanitizeProjectName(projectName), deriveProjectName(entries)));
             Path sandbox = workspaceGuard.ensureSandboxWorkspace().toRealPath();
+            Path projectDir = sandbox.resolve(resolvedProjectName).normalize();
+            if (projectDir.getParent() == null || !projectDir.getParent().equals(sandbox)) {
+                throw new IllegalArgumentException("Resolved project directory escapes the sandbox: " + resolvedProjectName);
+            }
 
             result.setProjectName(resolvedProjectName);
             result.setSandboxWorkspaceDir(sandbox.toString());
-            if (!isDirectoryEmpty(sandbox)) {
+            if (Files.isDirectory(projectDir) && !isDirectoryEmpty(projectDir)) {
                 if (!overwrite) {
                     result.setSuccess(false);
-                    result.setMessage("Sandbox workspace is not empty. Enable overwrite to replace it.");
+                    result.setMessage("Project \"" + resolvedProjectName + "\" already exists in the sandbox. Enable overwrite to replace it.");
                     saveLog(userId, traceId, result, overwrite, null);
                     return result;
                 }
-                clearDirectory(sandbox);
+                clearDirectory(projectDir);
             }
+            Files.createDirectories(projectDir);
 
-            CopyStats stats = copyUploadedProject(entries, sandbox);
-            ensureGitBaseline(sandbox);
+            CopyStats stats = copyUploadedProject(entries, projectDir);
+            ensureGitBaseline(projectDir);
             result.setSuccess(true);
             result.setFileCount(stats.fileCount);
             result.setDirectoryCount(stats.directoryCount);

@@ -83,6 +83,7 @@ public class SelfDevController {
             result.setSandboxConfigured(true);
             if (owner) {
                 result.setSandboxWorkspaceDir(sandbox.toString());
+                result.setAvailableProjects(safeListProjects());
             }
         } catch (Exception e) {
             result.setSandboxConfigured(false);
@@ -216,6 +217,14 @@ public class SelfDevController {
         target.setClaudeCodeLoginCommand("claude auth login");
         String output = firstNonBlank(source.getStdout(), source.getStderr(), source.getErrorMessage());
         target.setClaudeCodeAuthOutput(output);
+    }
+
+    private List<String> safeListProjects() {
+        try {
+            return workspaceGuard.listProjects();
+        } catch (Exception e) {
+            return java.util.Collections.emptyList();
+        }
     }
 
     private boolean canBootstrapOwner(HttpServletRequest request) {

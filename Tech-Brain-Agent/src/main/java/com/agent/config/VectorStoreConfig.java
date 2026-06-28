@@ -8,6 +8,7 @@ import dev.langchain4j.store.embedding.milvus.MilvusEmbeddingStore;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Lazy;
 
 @Configuration
 public class VectorStoreConfig {
@@ -30,6 +31,7 @@ public class VectorStoreConfig {
     }
 
     @Bean
+    @Lazy // 惰性创建：MilvusEmbeddingStore.build() 会同步连接 Milvus，推迟到首次使用时再连，避免后端启动时干等 Milvus 就绪（冷启动曾因此卡约 128s）。
     public EmbeddingStore<TextSegment> embeddingStore() {
         return MilvusEmbeddingStore.builder() // 初始化 LangChain4j 的 Milvus 向量库封装，供 RAG 检索和向量同步复用。
                 .host(milvusHost)

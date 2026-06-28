@@ -1,6 +1,10 @@
 # 后端服务端口：默认 8081（原 8080 在本机会被 WSL2/Hyper-V 动态保留导致无法绑定）；可用 SERVER_PORT 环境变量覆盖。
 server:
   port: ${SERVER_PORT:8081}
+  tomcat:
+    # 配合 multipart 不限大小：避免 Tomcat 因 maxSwallowSize / 表单大小限制在大项目整包上传时中断连接。
+    max-swallow-size: -1
+    max-http-form-post-size: -1
 
 #配置Mysql
 spring:
@@ -15,8 +19,10 @@ spring:
       # 文件上传大小限制配置
   servlet:
     multipart:
-      max-file-size: 20MB      # 限制单个文件最大为 20MB，和 techbrain.file.max-size-mb 保持一致
-      max-request-size: 100MB   # 限制单次请求的总大小为 100MB
+      # 不限制 multipart 上传大小：自迭代沙箱（/api/self-dev/project/upload）需要整包导入大项目。
+      # 普通用户文件上传仍由 UserFileServiceImpl.validateFileSize 按 techbrain.file.max-size-mb(20MB) 在代码层兜底。
+      max-file-size: -1
+      max-request-size: -1
 
   data:
     redis:
