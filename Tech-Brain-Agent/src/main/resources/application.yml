@@ -134,6 +134,23 @@ techbrain:
       - text/x-yaml
       - text/x-java-properties
       - application/octet-stream
+  selfdev:
+    workspace:
+      # P9 沙箱 workspace 根目录。生产环境请配置到 source-repo-dir 和服务运行目录之外。
+      sandbox-root: ${TECHBRAIN_SELFDEV_WORKSPACE_ROOT:../selfdev-workspaces}
+      # 当前真实项目源码目录，仅作为 LOCAL_COPY 只读来源，禁止写入。
+      source-repo-dir: ${TECHBRAIN_SELFDEV_SOURCE_REPO_DIR:.}
+      # 可选 Git 远程地址；为空时 GIT_CLONE 会被拒绝。
+      git-remote-url: ${TECHBRAIN_SELFDEV_GIT_REMOTE_URL:}
+      default-branch: ${TECHBRAIN_SELFDEV_DEFAULT_BRANCH:main}
+      workspace-prefix: ${TECHBRAIN_SELFDEV_WORKSPACE_PREFIX:selfdev-}
+      branch-prefix: ${TECHBRAIN_SELFDEV_BRANCH_PREFIX:selfdev/}
+      max-workspaces: ${TECHBRAIN_SELFDEV_MAX_WORKSPACES:20}
+      retention-days: ${TECHBRAIN_SELFDEV_RETENTION_DAYS:7}
+      max-operation-timeout-seconds: ${TECHBRAIN_SELFDEV_MAX_OPERATION_TIMEOUT_SECONDS:120}
+      allow-local-copy: ${TECHBRAIN_SELFDEV_ALLOW_LOCAL_COPY:true}
+      allow-git-clone: ${TECHBRAIN_SELFDEV_ALLOW_GIT_CLONE:true}
+      protect-source-repo: ${TECHBRAIN_SELFDEV_PROTECT_SOURCE_REPO:true}
   self-dev:
     sandbox-workspace-dir: ${TECHBRAIN_SELF_DEV_SANDBOX:D:/JavaAgent/Tech-Brain-sandbox}
     owner-user-ids: []
