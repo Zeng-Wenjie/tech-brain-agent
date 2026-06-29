@@ -151,6 +151,43 @@ techbrain:
       allow-local-copy: ${TECHBRAIN_SELFDEV_ALLOW_LOCAL_COPY:true}
       allow-git-clone: ${TECHBRAIN_SELFDEV_ALLOW_GIT_CLONE:true}
       protect-source-repo: ${TECHBRAIN_SELFDEV_PROTECT_SOURCE_REPO:true}
+    patch:
+      default-allowed-directories:
+        - Tech-Brain-Notes/src/main/java
+        - Tech-Brain-Notes/src/main/resources
+        - business-plugins
+      protected-directories:
+        - Tech-Brain-Agent/src/main/java/com/agent/security
+        - Tech-Brain-Agent/src/main/java/com/agent/tool
+        - Tech-Brain-Agent/src/main/java/com/agent/config
+        - Tech-Brain-Agent/src/main/java/com/agent/selfdev
+        - Tech-Brain-Agent/src/main/resources
+      blocked-file-names:
+        - .env
+        - .env.local
+        - .env.production
+        - application-prod.yml
+        - application-secret.yml
+        - bootstrap-prod.yml
+        - id_rsa
+        - id_dsa
+        - id_ecdsa
+        - id_ed25519
+        - authorized_keys
+      blocked-extensions:
+        - .pem
+        - .key
+        - .p12
+        - .pfx
+        - .jks
+        - .keystore
+        - .crt
+        - .cer
+        - .der
+      backup-root: ${TECHBRAIN_SELFDEV_PATCH_BACKUP_ROOT:../selfdev-backups}
+      max-changed-files: ${TECHBRAIN_SELFDEV_PATCH_MAX_CHANGED_FILES:50}
+      max-patch-size-kb: ${TECHBRAIN_SELFDEV_PATCH_MAX_SIZE_KB:1024}
+      max-operation-timeout-seconds: ${TECHBRAIN_SELFDEV_PATCH_TIMEOUT_SECONDS:120}
   self-dev:
     sandbox-workspace-dir: ${TECHBRAIN_SELF_DEV_SANDBOX:D:/JavaAgent/Tech-Brain-sandbox}
     owner-user-ids: []

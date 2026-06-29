@@ -17,8 +17,11 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.regex.Matcher;
@@ -44,6 +47,7 @@ public class ToolCallingChatServiceImpl implements ToolCallingChatService {
     private static final String RAG_SEARCH_TOOL_NAME = "ragSearch";
     private static final String SUMMARIZE_ARTICLE_TOOL_NAME = "summarizeArticle";
     private static final String READ_FILE_TOOL_NAME = "readFile";
+    private static final String APPLY_PATCH_TOOL_NAME = "applyPatch";
     private static final String ARTICLE_SUMMARY_RESULT_TYPE = "article_summary";
     private static final String SUMMARY_RESULT_EVENT_NAME = "summary_result";
 
@@ -52,15 +56,19 @@ public class ToolCallingChatServiceImpl implements ToolCallingChatService {
     private static final String ROUTE_REASON_FORCE_RAG_SEARCH = "force ragSearch";
     private static final String ROUTE_REASON_FORCE_SUMMARIZE_ARTICLE = "force summarizeArticle";
     private static final String ROUTE_REASON_FORCE_READ_FILE = "force readFile";
+    private static final String ROUTE_REASON_FORCE_APPLY_PATCH = "force applyPatch";
     private static final String ROUTE_REASON_MODEL_TOOL_CALL = "model tool_call";
 
     private static final String TOOL_TYPE_RAG = "RAG";
     private static final String TOOL_TYPE_SUMMARY = "SUMMARY";
     private static final String TOOL_TYPE_FILE = "FILE";
+    private static final String TOOL_TYPE_SELF_DEV = "SELF_DEV";
     private static final String TOOL_TYPE_OTHER = "OTHER";
 
     private static final Pattern ARTICLE_ID_PATTERN = Pattern.compile("(?:articleId|文章|笔记|ID|id)\\s*[:：#]??\\s*(\\d+)");
     private static final Pattern FILE_ID_PATTERN = Pattern.compile("(?:fileId|文件|附件|ID|id)\\s*[:：#]??\\s*(\\d+)");
+    private static final Pattern WORKSPACE_ID_PATTERN = Pattern.compile("(?i)workspaceId\\s*[:=]\\s*([A-Za-z0-9._-]+)");
+    private static final Pattern PATCH_FILE_PATH_PATTERN = Pattern.compile("(?i)patchFilePath\\s*[:=]\\s*([^\\s]+)");
 
     private static final String CONTEXT_PRIORITY_PROMPT = "\n\n上下文优先级从高到低："
             + "\n1. 当前用户输入 currentMessage。"
@@ -147,6 +155,11 @@ public class ToolCallingChatServiceImpl implements ToolCallingChatService {
                 return;
             }
 
+            if (shouldForceApplyPatch(userMessage, requestContext)) {
+                streamWithForcedApplyPatch(userMessage, safeMemorySummary, safeHistory, requestContext, callback);
+                return;
+            }
+
             if (shouldForceSummarizeArticle(userMessage, requestContext)) {
                 streamWithForcedSummarizeArticle(userMessage, requestContext, callback);
                 return;
@@ -205,6 +218,23 @@ public class ToolCallingChatServiceImpl implements ToolCallingChatService {
         String toolResult = executeToolWithLog(ragTool, arguments, requestContext, CALL_SOURCE_FORCE_ROUTE, ROUTE_REASON_FORCE_RAG_SEARCH);
         streamModel(buildForcedToolAnswerRequest(FORCED_RAG_SYSTEM_PROMPT, userMessage, memorySummary, historyMessages,
                 RAG_SEARCH_TOOL_NAME, arguments, toolResult, requestContext), callback);
+    }
+
+    private void streamWithForcedApplyPatch(String userMessage,
+                                            String memorySummary,
+                                            List<ToolChatHistoryMessage> historyMessages,
+                                            ToolCallingRequestContext requestContext,
+                                            ToolCallingStreamCallback callback) {
+        AiTool applyPatchTool = toolRegistry.getTool(APPLY_PATCH_TOOL_NAME); // 获取 applyPatch 工具。
+        if (applyPatchTool == null) {
+            callback.onError(new IllegalStateException("applyPatch 工具未注册")); // 未注册时返回错误。
+            return;
+        }
+        ObjectNode arguments = buildForcedApplyPatchArguments(userMessage); // 从用户消息提取明确参数。
+        String toolResult = executeToolWithLog(applyPatchTool, arguments, requestContext, CALL_SOURCE_FORCE_ROUTE, ROUTE_REASON_FORCE_APPLY_PATCH); // 执行并进入 tool_call_log。
+        streamModel(buildForcedToolAnswerRequest("你是 Tech-Brain 项目的 AI 助手。本轮已经执行 applyPatch 工具。必须基于工具 JSON 结果回答；成功时只提示可进入 P11 编译验证，不要声称已经编译或发布。"
+                        + CONTEXT_PRIORITY_PROMPT,
+                userMessage, memorySummary, historyMessages, APPLY_PATCH_TOOL_NAME, arguments, toolResult, requestContext), callback); // 把工具结果交给模型生成最终回答。
     }
 
     private void streamWithForcedReadFile(String userMessage,
@@ -350,7 +380,7 @@ public class ToolCallingChatServiceImpl implements ToolCallingChatService {
                                       String callSource,
                                       String routeReason) {
         String toolName = tool.name();
-        String argumentsJson = serialize(argumentsNode);
+        String argumentsJson = serializeArgumentsForLog(toolName, argumentsNode);
         Long logId = createRunningToolLog(requestContext, toolName, toolTypeOf(toolName), callSource, routeReason, argumentsJson);
         long startTime = System.currentTimeMillis();
         try {
@@ -464,6 +494,87 @@ public class ToolCallingChatServiceImpl implements ToolCallingChatService {
         return !isAttachmentIntent(userMessage, requestContext);
     }
 
+    private boolean shouldForceApplyPatch(String userMessage, ToolCallingRequestContext requestContext) {
+        if (isBlank(userMessage)) {
+            return false; // 空消息不路由。
+        }
+        String text = userMessage.toLowerCase(Locale.ROOT); // 统一小写判断。
+        if (containsAny(text, "看一下 patch", "预览 patch", "这个 patch 改了什么", "review patch", "preview patch")) {
+            return false; // 预览/查看类意图不调用 applyPatch。
+        }
+        boolean applyIntent = containsAny(text, "应用 patch", "应用这个 patch", "执行 patch", "确认应用 patch", "apply patch"); // 明确应用意图。
+        boolean hasWorkspaceId = WORKSPACE_ID_PATTERN.matcher(userMessage).find(); // 必须提供 workspaceId。
+        boolean hasConfirmToken = userMessage.contains("APPLY_PATCH"); // 必须提供确认标记。
+        boolean hasPatchSource = !isBlank(extractPatchContent(userMessage)) || PATCH_FILE_PATH_PATTERN.matcher(userMessage).find(); // 必须有 patch 内容或路径。
+        return applyIntent && hasWorkspaceId && hasConfirmToken && hasPatchSource; // 四项齐备才强制路由。
+    }
+
+    private ObjectNode buildForcedApplyPatchArguments(String userMessage) {
+        ObjectNode arguments = objectMapper.createObjectNode(); // 构造 applyPatch 参数。
+        String workspaceId = extractFirstGroup(WORKSPACE_ID_PATTERN, userMessage); // 提取 workspaceId。
+        if (!isBlank(workspaceId)) {
+            arguments.put("workspaceId", workspaceId); // 写 workspaceId。
+        }
+        String patchFilePath = extractFirstGroup(PATCH_FILE_PATH_PATTERN, userMessage); // 提取 patchFilePath。
+        if (!isBlank(patchFilePath)) {
+            arguments.put("patchFilePath", patchFilePath); // 写 patchFilePath。
+        }
+        String patchContent = extractPatchContent(userMessage); // 提取 patchContent。
+        if (!isBlank(patchContent)) {
+            arguments.put("patchContent", patchContent); // 写 patchContent，后续日志会脱敏。
+        }
+        arguments.put("requireConfirm", true); // P10 默认需要确认。
+        arguments.put("confirmToken", "APPLY_PATCH"); // 明确确认 token。
+        if (containsAny(userMessage.toLowerCase(Locale.ROOT), "dryrun=true", "dry run", "只校验", "仅校验")) {
+            arguments.put("dryRun", true); // 用户明确 dryRun 时只校验。
+        }
+        return arguments; // 返回参数。
+    }
+
+    private String extractPatchContent(String userMessage) {
+        String fencedDiff = extractFencedBlock(userMessage, "```diff"); // 优先读取 diff 代码块。
+        if (!isBlank(fencedDiff)) {
+            return fencedDiff; // 返回 diff 代码块内容。
+        }
+        String fencedPatch = extractFencedBlock(userMessage, "```patch"); // 兼容 patch 代码块。
+        if (!isBlank(fencedPatch)) {
+            return fencedPatch; // 返回 patch 代码块内容。
+        }
+        int diffIndex = userMessage.indexOf("diff --git "); // 查找 git diff 起点。
+        if (diffIndex >= 0) {
+            return userMessage.substring(diffIndex).trim(); // 从 diff 起点截取。
+        }
+        int unifiedIndex = userMessage.indexOf("--- a/"); // 兼容无 diff --git 的 unified diff。
+        if (unifiedIndex >= 0) {
+            return userMessage.substring(unifiedIndex).trim(); // 从 --- a/ 起点截取。
+        }
+        return null; // 没有 patch 内容。
+    }
+
+    private String extractFencedBlock(String text, String fenceStart) {
+        int start = text.indexOf(fenceStart); // 找代码块起点。
+        if (start < 0) {
+            return null; // 没有代码块。
+        }
+        int contentStart = text.indexOf('\n', start); // 找第一行结尾。
+        if (contentStart < 0) {
+            return null; // 代码块格式不完整。
+        }
+        int end = text.indexOf("```", contentStart + 1); // 找结束围栏。
+        if (end < 0) {
+            return text.substring(contentStart + 1).trim(); // 没结束围栏时取剩余内容。
+        }
+        return text.substring(contentStart + 1, end).trim(); // 返回围栏内内容。
+    }
+
+    private String extractFirstGroup(Pattern pattern, String text) {
+        if (pattern == null || text == null) {
+            return null; // 参数缺失。
+        }
+        Matcher matcher = pattern.matcher(text); // 创建 matcher。
+        return matcher.find() ? matcher.group(1) : null; // 返回第一组。
+    }
+
     private boolean shouldForceSummarizeArticle(String userMessage, ToolCallingRequestContext requestContext) {
         if (isBlank(userMessage) || hasAttachedFiles(requestContext)) {
             return false;
@@ -552,7 +663,7 @@ public class ToolCallingChatServiceImpl implements ToolCallingChatService {
     private String buildToolResultPrompt(String toolName, JsonNode arguments, String toolResult) {
         return "本轮工具执行结果："
                 + "\ntoolName=" + toolName
-                + "\narguments_json=" + serialize(arguments)
+                + "\narguments_json=" + serializeArgumentsForLog(toolName, arguments)
                 + "\nresult_json_or_text=\n" + limitText(toolResult, TOOL_RESULT_MAX_LENGTH);
     }
 
@@ -592,6 +703,74 @@ public class ToolCallingChatServiceImpl implements ToolCallingChatService {
         }
     }
 
+    private String serializeArgumentsForLog(String toolName, JsonNode arguments) {
+        if (!APPLY_PATCH_TOOL_NAME.equals(toolName)) {
+            return serialize(arguments); // 其它工具保持原有日志参数。
+        }
+        try {
+            ObjectNode sanitized = objectMapper.createObjectNode(); // applyPatch 参数脱敏副本。
+            copyTextForLog(arguments, sanitized, "workspaceId", false); // workspaceId 可记录。
+            copyTextForLog(arguments, sanitized, "workspacePath", true); // workspacePath 可能是绝对路径，需要脱敏。
+            copyTextForLog(arguments, sanitized, "patchFilePath", true); // patchFilePath 可能是绝对路径，需要脱敏。
+            if (arguments != null && arguments.path("allowedDirectories").isArray()) {
+                sanitized.set("allowedDirectories", arguments.path("allowedDirectories")); // 白名单目录可记录。
+            }
+            copyScalarForLog(arguments, sanitized, "dryRun"); // dryRun 可记录。
+            copyScalarForLog(arguments, sanitized, "backupEnabled"); // backupEnabled 可记录。
+            copyScalarForLog(arguments, sanitized, "rollbackOnFailure"); // rollbackOnFailure 可记录。
+            copyScalarForLog(arguments, sanitized, "maxChangedFiles"); // maxChangedFiles 可记录。
+            copyScalarForLog(arguments, sanitized, "requireConfirm"); // requireConfirm 可记录。
+            sanitized.put("confirmTokenPresent", arguments != null && !arguments.path("confirmToken").asText("").isBlank()); // 只记录是否提供确认。
+            String patchContent = arguments == null ? null : arguments.path("patchContent").asText(null); // 读取 patchContent。
+            if (patchContent != null && !patchContent.isBlank()) {
+                sanitized.put("patchContentRedacted", true); // 明确 patch 全文已脱敏。
+                sanitized.put("patchSize", patchContent.getBytes(StandardCharsets.UTF_8).length); // 记录大小。
+                sanitized.put("patchHash", sha256(patchContent)); // 记录 hash 便于审计。
+            } else {
+                sanitized.put("patchContentRedacted", false); // 未传 patchContent。
+            }
+            return objectMapper.writeValueAsString(sanitized); // 返回脱敏参数。
+        } catch (Exception e) {
+            return "{\"tool\":\"applyPatch\",\"argumentsRedacted\":true,\"error\":\"failed to sanitize arguments\"}"; // 脱敏失败兜底。
+        }
+    }
+
+    private void copyTextForLog(JsonNode source, ObjectNode target, String fieldName, boolean redactAbsolutePath) {
+        if (source == null || source.path(fieldName).isMissingNode() || source.path(fieldName).isNull()) {
+            return; // 字段缺失时不写。
+        }
+        String value = source.path(fieldName).asText(""); // 读取文本。
+        target.put(fieldName, redactAbsolutePath ? redactAbsolutePath(value) : value); // 按需脱敏绝对路径。
+    }
+
+    private void copyScalarForLog(JsonNode source, ObjectNode target, String fieldName) {
+        if (source == null || source.path(fieldName).isMissingNode() || source.path(fieldName).isNull()) {
+            return; // 字段缺失时不写。
+        }
+        target.set(fieldName, source.path(fieldName)); // 标量参数直接复制。
+    }
+
+    private String redactAbsolutePath(String value) {
+        if (value == null) {
+            return null; // 空值直接返回。
+        }
+        String normalized = value.replace('\\', '/'); // 统一分隔符。
+        if (normalized.matches("^[A-Za-z]:/.*") || normalized.startsWith("/")) {
+            return "[absolute-path-redacted]"; // 绝对路径不入库。
+        }
+        return value; // 相对路径可记录。
+    }
+
+    private String sha256(String text) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256"); // 创建 SHA-256。
+            byte[] hash = digest.digest(text.getBytes(StandardCharsets.UTF_8)); // 计算 hash。
+            return HexFormat.of().formatHex(hash); // 转十六进制。
+        } catch (Exception e) {
+            return "hash_error"; // hash 失败兜底。
+        }
+    }
+
     private boolean isAllowedToolName(String toolName) {
         return !isBlank(toolName) && toolRegistry.getTool(toolName) != null;
     }
@@ -605,6 +784,9 @@ public class ToolCallingChatServiceImpl implements ToolCallingChatService {
         }
         if (READ_FILE_TOOL_NAME.equals(toolName)) {
             return TOOL_TYPE_FILE;
+        }
+        if (APPLY_PATCH_TOOL_NAME.equals(toolName)) {
+            return TOOL_TYPE_SELF_DEV; // P10 applyPatch 属于自迭代高风险写操作，日志中单独标记。
         }
         return TOOL_TYPE_OTHER;
     }

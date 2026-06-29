@@ -2,6 +2,7 @@ package com.agent.selfdev.terminal;
 
 import com.agent.config.SelfDevProperties;
 import com.agent.entity.dto.DevActionLogCreateRequest;
+import com.agent.entity.dto.SandboxWorkspaceInfo;
 import com.agent.entity.enums.DevActionResult;
 import com.agent.entity.enums.DevActionStatus;
 import com.agent.entity.enums.DevTargetType;
@@ -130,7 +131,10 @@ public class SelfDevTerminalWebSocketHandler extends TextWebSocketHandler {
         String username = getStringAttribute(session, SelfDevTerminalHandshakeInterceptor.ATTR_USERNAME);
         accessGuard.assertOwner(userId, username);
 
-        Path workspace = resolveProjectWorkspace(payload.path("project").asText(null));
+        WorkspaceContext workspaceContext = resolveWorkspaceContext(
+                payload.path("workspaceId").asText(null),
+                payload.path("project").asText(null));
+        Path workspace = workspaceContext.workspace();
         List<String> allowedPaths = readAllowedPaths(payload.path("allowedPaths"));
         if (allowedPaths.isEmpty()) {
             allowedPaths = List.of(".");
@@ -153,6 +157,9 @@ public class SelfDevTerminalWebSocketHandler extends TextWebSocketHandler {
 
         state.process = process;
         state.workspace = workspace;
+        state.workspaceId = workspaceContext.info().getWorkspaceId();
+        state.workspaceName = workspaceContext.info().getWorkspaceName();
+        state.relativeWorkspacePath = workspaceContext.info().getRelativeWorkspacePath();
         state.command = command;
         state.allowedPaths = allowedPaths;
         state.intent = textOrDefault(payload.path("intent").asText(null), "Claude Code terminal session");
@@ -161,6 +168,9 @@ public class SelfDevTerminalWebSocketHandler extends TextWebSocketHandler {
 
         send(session, "started", Map.of(
                 "cwd", workspace.toString(),
+                "workspaceId", state.workspaceId,
+                "workspaceName", state.workspaceName,
+                "relativeWorkspacePath", state.relativeWorkspacePath,
                 "command", displayCommand(command),
                 "traceId", state.traceId
         ));
@@ -208,6 +218,9 @@ public class SelfDevTerminalWebSocketHandler extends TextWebSocketHandler {
         payload.put("exitCode", exitCode);
         payload.put("durationMs", durationMs);
         payload.put("traceId", state.traceId);
+        payload.put("workspaceId", state.workspaceId);
+        payload.put("workspaceName", state.workspaceName);
+        payload.put("relativeWorkspacePath", state.relativeWorkspacePath);
         payload.put("success", false);
         payload.put("status", "FAILED");
 
@@ -319,18 +332,11 @@ public class SelfDevTerminalWebSocketHandler extends TextWebSocketHandler {
     /**
      * 把前端传来的 project 解析成沙箱下的项目工作目录；为空时若沙箱里仅有一个项目则用它，否则提示先选/先导入。
      */
-    private Path resolveProjectWorkspace(String project) {
-        if (project != null && !project.trim().isEmpty()) {
-            return workspaceGuard.resolveProjectWorkspace(project.trim());
-        }
-        List<String> projects = workspaceGuard.listProjects();
-        if (projects.size() == 1) {
-            return workspaceGuard.resolveProjectWorkspace(projects.get(0));
-        }
-        if (projects.isEmpty()) {
-            throw new IllegalStateException("沙箱里还没有项目，请先在左侧导入一个项目。");
-        }
-        throw new IllegalArgumentException("请先在左侧选择要操作的项目。");
+    private WorkspaceContext resolveWorkspaceContext(String workspaceId, String project) {
+        SandboxWorkspaceInfo info = workspaceGuard.resolveWorkspaceInfo(workspaceId, project); // workspaceId first.
+        Path workspace = Path.of(info.getWorkspacePath()).toAbsolutePath().normalize(); // Internal absolute path.
+        workspaceGuard.validateWorkspaceForClaude(workspace); // P9 validation before starting Claude Code.
+        return new WorkspaceContext(info, workspace); // Bind path and metadata for state/logs.
     }
 
     private Long saveDevActionLog(TerminalSessionState state,
@@ -351,7 +357,7 @@ public class SelfDevTerminalWebSocketHandler extends TextWebSocketHandler {
             request.setResult(success ? DevActionResult.SUCCESS.name() : DevActionResult.FAILED.name());
             request.setStatus(success ? DevActionStatus.SUCCESS.name() : DevActionStatus.FAILED.name());
             request.setTargetType(DevTargetType.MODULE.name());
-            request.setTargetModule("Claude Code terminal");
+            request.setTargetModule(firstNonBlank(state.workspaceName, "Claude Code terminal"));
             request.setTargetFile(firstOrNull(changedFiles));
             request.setTargetPath(firstOrNull(changedFiles));
             request.setTitle("Claude Code terminal session");
@@ -382,7 +388,9 @@ public class SelfDevTerminalWebSocketHandler extends TextWebSocketHandler {
         result.put("status", status);
         result.put("summary", summary);
         result.put("command", displayCommand(state.command));
-        result.put("workspace", state.workspace == null ? null : state.workspace.toString());
+        result.put("workspaceId", state.workspaceId);
+        result.put("workspaceName", state.workspaceName);
+        result.put("relativeWorkspacePath", state.relativeWorkspacePath);
         result.put("output", limitText(state.transcript.toString(), DISPLAY_TEXT_LIMIT));
         result.put("exitCode", exitCode);
         result.put("durationMs", durationMs);
@@ -460,6 +468,18 @@ public class SelfDevTerminalWebSocketHandler extends TextWebSocketHandler {
         return values == null || values.isEmpty() ? null : values.get(0);
     }
 
+    private String firstNonBlank(String... values) {
+        if (values == null) {
+            return null;
+        }
+        for (String value : values) {
+            if (!isBlank(value)) {
+                return value.trim();
+            }
+        }
+        return null;
+    }
+
     private List<String> safeList(List<String> values) {
         return values == null ? Collections.emptyList() : values;
     }
@@ -494,6 +514,9 @@ public class SelfDevTerminalWebSocketHandler extends TextWebSocketHandler {
         private boolean transcriptTruncated;
         private PtyProcess process;
         private Path workspace;
+        private String workspaceId;
+        private String workspaceName;
+        private String relativeWorkspacePath;
         private List<String> command = Collections.emptyList();
         private List<String> allowedPaths = List.of(".");
         private String intent;
@@ -503,5 +526,8 @@ public class SelfDevTerminalWebSocketHandler extends TextWebSocketHandler {
         private TerminalSessionState(WebSocketSession session) {
             this.session = session;
         }
+    }
+
+    private record WorkspaceContext(SandboxWorkspaceInfo info, Path workspace) {
     }
 }

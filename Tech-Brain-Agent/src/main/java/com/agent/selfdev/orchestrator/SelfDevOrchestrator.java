@@ -2,6 +2,7 @@ package com.agent.selfdev.orchestrator;
 
 import com.agent.config.SelfDevProperties;
 import com.agent.entity.dto.DevActionLogCreateRequest;
+import com.agent.entity.dto.SandboxWorkspaceInfo;
 import com.agent.entity.dto.SelfDevRequest;
 import com.agent.entity.dto.SelfDevResult;
 import com.agent.entity.enums.DevActionResult;
@@ -69,7 +70,11 @@ public class SelfDevOrchestrator {
         result.setIntent(blankToDefault(safeRequest.getIntent(), "Claude Code sandbox development"));
         try {
             validateRequest(safeRequest);
-            Path workspace = workspaceGuard.resolveProjectWorkspace(safeRequest.getProject());
+            SandboxWorkspaceInfo workspaceInfo =
+                    workspaceGuard.resolveWorkspaceInfo(safeRequest.getWorkspaceId(), safeRequest.getProject());
+            Path workspace = Path.of(workspaceInfo.getWorkspacePath()).toAbsolutePath().normalize();
+            workspaceGuard.validateWorkspaceForClaude(workspace);
+            fillWorkspaceResult(result, workspaceInfo);
             List<String> allowedPaths = workspaceGuard.sanitizeAllowedPaths(safeRequest.getAllowedPaths());
             if (allowedPaths.isEmpty()) {
                 throw new IllegalArgumentException("At least one allowed path is required.");
@@ -184,7 +189,7 @@ public class SelfDevOrchestrator {
             logRequest.setResult(result.isSuccess() ? DevActionResult.SUCCESS.name() : DevActionResult.FAILED.name());
             logRequest.setStatus(result.isSuccess() ? DevActionStatus.SUCCESS.name() : DevActionStatus.FAILED.name());
             logRequest.setTargetType(DevTargetType.MODULE.name());
-            logRequest.setTargetModule(request.getModuleScope());
+            logRequest.setTargetModule(firstNonBlank(request.getModuleScope(), result.getWorkspaceName()));
             logRequest.setTargetFile(firstOrNull(result.getChangedFiles()));
             logRequest.setTargetPath(firstOrNull(result.getChangedFiles()));
             logRequest.setTitle("Claude Code sandbox execution");
@@ -206,6 +211,9 @@ public class SelfDevOrchestrator {
             payload.put("intent", result.getIntent());
             payload.put("status", result.getStatus());
             payload.put("summary", result.getSummary());
+            payload.put("workspaceId", result.getWorkspaceId());
+            payload.put("workspaceName", result.getWorkspaceName());
+            payload.put("relativeWorkspacePath", result.getRelativeWorkspacePath());
             payload.put("prompt", result.getPrompt());
             payload.put("stdout", result.getStdout());
             payload.put("stderr", result.getStderr());
@@ -222,6 +230,15 @@ public class SelfDevOrchestrator {
         }
     }
 
+    private void fillWorkspaceResult(SelfDevResult result, SandboxWorkspaceInfo workspaceInfo) {
+        if (workspaceInfo == null) {
+            return;
+        }
+        result.setWorkspaceId(workspaceInfo.getWorkspaceId()); // Preferred P9 ID for later P10 applyPatch.
+        result.setWorkspaceName(workspaceInfo.getWorkspaceName()); // Legacy project-compatible display name.
+        result.setRelativeWorkspacePath(workspaceInfo.getRelativeWorkspacePath()); // Do not expose absolute path in logs.
+    }
+
     private void appendSection(StringBuilder prompt, String title, String value) {
         if (!isBlank(value)) {
             prompt.append('\n').append(title).append(":\n").append(value.trim()).append('\n');
@@ -230,6 +247,18 @@ public class SelfDevOrchestrator {
 
     private String firstOrNull(List<String> values) {
         return values == null || values.isEmpty() ? null : values.get(0);
+    }
+
+    private String firstNonBlank(String... values) {
+        if (values == null) {
+            return null;
+        }
+        for (String value : values) {
+            if (!isBlank(value)) {
+                return value.trim();
+            }
+        }
+        return null;
     }
 
     private String blankToDefault(String value, String fallback) {

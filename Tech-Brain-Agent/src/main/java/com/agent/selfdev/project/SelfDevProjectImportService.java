@@ -4,8 +4,11 @@ import com.agent.entity.dto.DevActionLogCreateRequest;
 import com.agent.entity.dto.SelfDevProjectImportRequest;
 import com.agent.entity.dto.SelfDevProjectImportResult;
 import com.agent.entity.enums.DevActionResult;
+import com.agent.entity.enums.DevActionStatus;
+import com.agent.entity.enums.DevActionType;
 import com.agent.entity.enums.DevTargetType;
 import com.agent.selfdev.security.SelfDevWorkspaceGuard;
+import com.agent.selfdev.workspace.SafeCommandExecutor;
 import com.agent.service.DevActionLogService;
 import com.agent.toolcalling.devlog.DevActionLogSaveResult;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -13,11 +16,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
@@ -27,7 +27,6 @@ import java.nio.file.Paths;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
@@ -35,8 +34,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Imports a local project copy into the sandbox root used by Claude Code.
@@ -46,13 +43,15 @@ import java.util.concurrent.TimeUnit;
 public class SelfDevProjectImportService {
 
     private final SelfDevWorkspaceGuard workspaceGuard;
+    private final SafeCommandExecutor safeCommandExecutor;
     private final DevActionLogService devActionLogService;
     private final ObjectMapper objectMapper = new ObjectMapper();
-    private static final Duration GIT_TIMEOUT = Duration.ofSeconds(60);
 
     public SelfDevProjectImportService(SelfDevWorkspaceGuard workspaceGuard,
+                                       SafeCommandExecutor safeCommandExecutor,
                                        DevActionLogService devActionLogService) {
         this.workspaceGuard = workspaceGuard;
+        this.safeCommandExecutor = safeCommandExecutor;
         this.devActionLogService = devActionLogService;
     }
 
@@ -64,21 +63,19 @@ public class SelfDevProjectImportService {
             Path source = resolveSourcePath(request);
             String projectName = workspaceGuard.sanitizeProjectName(
                     source.getFileName() == null ? source.toString() : source.getFileName().toString());
+            String workspaceId = workspaceGuard.createWorkspaceId();
+            String workspaceName = workspaceGuard.createWorkspaceName(projectName, workspaceId);
             Path sandbox = workspaceGuard.ensureSandboxWorkspace();
             Path realSource = source.toRealPath();
             Path realSandbox = sandbox.toRealPath();
             rejectOverlappingPaths(realSource, realSandbox);
-            Path projectDir = realSandbox.resolve(projectName).normalize();
-            if (projectDir.getParent() == null || !projectDir.getParent().equals(realSandbox)) {
-                throw new IllegalArgumentException("Resolved project directory escapes the sandbox: " + projectName);
-            }
+            Path projectDir = workspaceGuard.resolveNewProjectWorkspace(workspaceName);
 
-            result.setProjectName(projectName);
-            result.setSandboxWorkspaceDir(realSandbox.toString());
+            fillWorkspaceResult(result, workspaceId, workspaceName, projectDir, realSandbox);
             if (Files.isDirectory(projectDir) && !isDirectoryEmpty(projectDir)) {
                 if (!overwrite) {
                     result.setSuccess(false);
-                    result.setMessage("Project \"" + projectName + "\" already exists in the sandbox. Enable overwrite to replace it.");
+                    result.setMessage("Workspace \"" + workspaceName + "\" already exists in the sandbox. Enable overwrite to replace it.");
                     saveLog(userId, traceId, result, overwrite, null);
                     return result;
                 }
@@ -88,11 +85,12 @@ public class SelfDevProjectImportService {
 
             CopyStats stats = copyProjectContents(realSource, projectDir);
             ensureGitBaseline(projectDir);
+            workspaceGuard.validateWorkspaceForClaude(projectDir);
             result.setSuccess(true);
             result.setFileCount(stats.fileCount);
             result.setDirectoryCount(stats.directoryCount);
             result.setByteCount(stats.byteCount);
-            result.setMessage("Project imported into the Claude Code sandbox.");
+            result.setMessage("Project imported into a P9 Claude Code workspace.");
             saveLog(userId, traceId, result, overwrite, null);
             return result;
         } catch (Exception e) {
@@ -115,18 +113,16 @@ public class SelfDevProjectImportService {
             List<UploadEntry> entries = normalizeUploadEntries(files, relativePaths);
             String resolvedProjectName = workspaceGuard.sanitizeProjectName(
                     firstNonBlank(sanitizeProjectName(projectName), deriveProjectName(entries)));
+            String workspaceId = workspaceGuard.createWorkspaceId();
+            String workspaceName = workspaceGuard.createWorkspaceName(resolvedProjectName, workspaceId);
             Path sandbox = workspaceGuard.ensureSandboxWorkspace().toRealPath();
-            Path projectDir = sandbox.resolve(resolvedProjectName).normalize();
-            if (projectDir.getParent() == null || !projectDir.getParent().equals(sandbox)) {
-                throw new IllegalArgumentException("Resolved project directory escapes the sandbox: " + resolvedProjectName);
-            }
+            Path projectDir = workspaceGuard.resolveNewProjectWorkspace(workspaceName);
 
-            result.setProjectName(resolvedProjectName);
-            result.setSandboxWorkspaceDir(sandbox.toString());
+            fillWorkspaceResult(result, workspaceId, workspaceName, projectDir, sandbox);
             if (Files.isDirectory(projectDir) && !isDirectoryEmpty(projectDir)) {
                 if (!overwrite) {
                     result.setSuccess(false);
-                    result.setMessage("Project \"" + resolvedProjectName + "\" already exists in the sandbox. Enable overwrite to replace it.");
+                    result.setMessage("Workspace \"" + workspaceName + "\" already exists in the sandbox. Enable overwrite to replace it.");
                     saveLog(userId, traceId, result, overwrite, null);
                     return result;
                 }
@@ -136,11 +132,12 @@ public class SelfDevProjectImportService {
 
             CopyStats stats = copyUploadedProject(entries, projectDir);
             ensureGitBaseline(projectDir);
+            workspaceGuard.validateWorkspaceForClaude(projectDir);
             result.setSuccess(true);
             result.setFileCount(stats.fileCount);
             result.setDirectoryCount(stats.directoryCount);
             result.setByteCount(stats.byteCount);
-            result.setMessage("Local project uploaded into the Claude Code sandbox.");
+            result.setMessage("Local project uploaded into a P9 Claude Code workspace.");
             saveLog(userId, traceId, result, overwrite, null);
             return result;
         } catch (Exception e) {
@@ -176,6 +173,7 @@ public class SelfDevProjectImportService {
     }
 
     private void clearDirectory(Path directory) throws IOException {
+        workspaceGuard.validateDeletionTarget(directory);
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(directory)) {
             for (Path child : stream) {
                 deleteRecursively(child);
@@ -184,7 +182,8 @@ public class SelfDevProjectImportService {
     }
 
     private void deleteRecursively(Path path) throws IOException {
-        Files.walkFileTree(path, new SimpleFileVisitor<>() {
+        Path safePath = workspaceGuard.validateDeletionTarget(path);
+        Files.walkFileTree(safePath, new SimpleFileVisitor<>() {
             @Override
             public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
                 Files.deleteIfExists(file);
@@ -360,72 +359,30 @@ public class SelfDevProjectImportService {
     }
 
     private void ensureGitBaseline(Path sandbox) throws IOException {
+        workspaceGuard.validateDeletionTarget(sandbox);
         if (Files.isDirectory(sandbox.resolve(".git"))) {
             return;
         }
-        GitResult init = runGit(sandbox, List.of("init"));
-        if (init.exitCode() != 0) {
-            throw new IOException("Failed to initialize sandbox git repository: " + firstNonBlank(init.stderr(), init.stdout()));
+        SafeCommandExecutor.CommandResult init = safeCommandExecutor.runGitInWorkspace(sandbox, List.of("init"));
+        if (init.getExitCode() != 0) {
+            throw new IOException("Failed to initialize sandbox git repository: " + firstNonBlank(init.getStderr(), init.getStdout()));
         }
-        GitResult add = runGit(sandbox, List.of("add", "-A"));
-        if (add.exitCode() != 0) {
-            throw new IOException("Failed to stage sandbox import baseline: " + firstNonBlank(add.stderr(), add.stdout()));
+        SafeCommandExecutor.CommandResult add = safeCommandExecutor.runGitInWorkspace(sandbox, List.of("add", "-A"));
+        if (add.getExitCode() != 0) {
+            throw new IOException("Failed to stage sandbox import baseline: " + firstNonBlank(add.getStderr(), add.getStdout()));
         }
-        GitResult commit = runGit(sandbox, List.of(
+        SafeCommandExecutor.CommandResult commit = safeCommandExecutor.runGitInWorkspace(sandbox, List.of(
                 "-c", "user.name=Tech-Brain",
                 "-c", "user.email=tech-brain@local",
                 "commit", "-m", "Sandbox import baseline"));
-        if (commit.exitCode() != 0 && !containsNothingToCommit(commit)) {
-            throw new IOException("Failed to commit sandbox import baseline: " + firstNonBlank(commit.stderr(), commit.stdout()));
+        if (commit.getExitCode() != 0 && !containsNothingToCommit(commit)) {
+            throw new IOException("Failed to commit sandbox import baseline: " + firstNonBlank(commit.getStderr(), commit.getStdout()));
         }
     }
 
-    private boolean containsNothingToCommit(GitResult result) {
-        String output = (result.stdout() + "\n" + result.stderr()).toLowerCase();
+    private boolean containsNothingToCommit(SafeCommandExecutor.CommandResult result) {
+        String output = (result.getStdout() + "\n" + result.getStderr()).toLowerCase();
         return output.contains("nothing to commit") || output.contains("no changes added to commit");
-    }
-
-    private GitResult runGit(Path workspace, List<String> args) {
-        Process process = null;
-        try {
-            List<String> command = new ArrayList<>();
-            command.add("git");
-            command.addAll(args);
-            ProcessBuilder builder = new ProcessBuilder(command);
-            builder.directory(workspace.toFile());
-            process = builder.start();
-            CompletableFuture<String> stdout = readAsync(process.getInputStream());
-            CompletableFuture<String> stderr = readAsync(process.getErrorStream());
-            boolean finished = process.waitFor(GIT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-            if (!finished) {
-                process.destroyForcibly();
-                return new GitResult(-1, "", "git command timed out: " + String.join(" ", args));
-            }
-            return new GitResult(
-                    process.exitValue(),
-                    stdout.get(5, TimeUnit.SECONDS),
-                    stderr.get(5, TimeUnit.SECONDS));
-        } catch (Exception e) {
-            if (process != null) {
-                process.destroyForcibly();
-            }
-            return new GitResult(-1, "", e.getMessage());
-        }
-    }
-
-    private CompletableFuture<String> readAsync(InputStream inputStream) {
-        return CompletableFuture.supplyAsync(() -> {
-            StringBuilder builder = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    builder.append(line).append(System.lineSeparator());
-                }
-            } catch (Exception e) {
-                builder.append("[stream read failed] ").append(e.getMessage());
-            }
-            return builder.toString();
-        });
     }
 
     private long safeSize(Path file) {
@@ -445,18 +402,20 @@ public class SelfDevProjectImportService {
             DevActionLogCreateRequest request = new DevActionLogCreateRequest();
             request.setUserId(userId);
             request.setTraceId(traceId);
+            request.setActionType(DevActionType.SANDBOX_WORKSPACE_CREATED.name());
             request.setResult(result.isSuccess() ? DevActionResult.SUCCESS.name() : DevActionResult.FAILED.name());
+            request.setStatus(result.isSuccess() ? DevActionStatus.SUCCESS.name() : DevActionStatus.FAILED.name());
             request.setTargetType(DevTargetType.MODULE.name());
             request.setTargetModule(isBlank(result.getProjectName()) ? "Claude Code sandbox" : result.getProjectName());
             request.setTargetPath(".");
-            request.setTitle("Import project into Claude Code sandbox");
-            request.setIntent("Import a local project copy into the Claude Code sandbox workspace.");
+            request.setTitle("Import project into P9 Claude Code workspace");
+            request.setIntent("Create an isolated P9 sandbox workspace for a local project copy before Claude Code runs.");
             request.setSummary(result.isSuccess()
-                    ? "Project imported into the Claude Code sandbox for isolated development."
-                    : "Project import into the Claude Code sandbox failed.");
+                    ? "Project imported into a P9 sandbox workspace; Claude Code can only run after P9 validation."
+                    : "Project import into the P9 sandbox workspace failed.");
             request.setResultJson(toJson(result, overwrite));
             request.setErrorMsg(error == null ? null : error.getMessage());
-            DevActionLogSaveResult saveResult = devActionLogService.recordFileModified(request);
+            DevActionLogSaveResult saveResult = devActionLogService.saveDevAction(request);
             if (saveResult != null && saveResult.isSaved()) {
                 result.setDevLogId(saveResult.getDevLogId());
             }
@@ -470,7 +429,9 @@ public class SelfDevProjectImportService {
             Map<String, Object> payload = new LinkedHashMap<>();
             payload.put("success", result.isSuccess());
             payload.put("projectName", result.getProjectName());
-            payload.put("sandboxWorkspaceDir", result.getSandboxWorkspaceDir());
+            payload.put("workspaceId", result.getWorkspaceId());
+            payload.put("workspaceName", result.getWorkspaceName());
+            payload.put("relativeWorkspacePath", result.getRelativeWorkspacePath());
             payload.put("fileCount", result.getFileCount());
             payload.put("directoryCount", result.getDirectoryCount());
             payload.put("byteCount", result.getByteCount());
@@ -480,6 +441,18 @@ public class SelfDevProjectImportService {
         } catch (Exception e) {
             return "{\"error\":\"failed to serialize project import result\"}";
         }
+    }
+
+    private void fillWorkspaceResult(SelfDevProjectImportResult result,
+                                     String workspaceId,
+                                     String workspaceName,
+                                     Path workspacePath,
+                                     Path sandboxRoot) {
+        result.setProjectName(workspaceName); // Legacy frontend selector value.
+        result.setWorkspaceId(workspaceId); // Preferred P9 workspace ID.
+        result.setWorkspaceName(workspaceName); // P9 workspace directory name.
+        result.setRelativeWorkspacePath(workspaceGuard.relativeToSandbox(workspacePath)); // Relative sandbox path.
+        result.setSandboxWorkspaceDir(sandboxRoot.toString()); // Keep existing frontend display field.
     }
 
     private boolean samePath(Path left, Path right) {
@@ -507,9 +480,6 @@ public class SelfDevProjectImportService {
     }
 
     private record UploadEntry(MultipartFile file, String relativePath) {
-    }
-
-    private record GitResult(int exitCode, String stdout, String stderr) {
     }
 
     private static class CopyStats {

@@ -1,5 +1,6 @@
 package com.agent.selfdev.diff;
 
+import com.agent.selfdev.workspace.SandboxWorkspaceGuard;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -26,18 +27,24 @@ public class WorkspaceDiffService {
 
     private static final Duration GIT_TIMEOUT = Duration.ofSeconds(30);
     private static final long UNTRACKED_TEXT_LIMIT_BYTES = 200_000L;
+    private final SandboxWorkspaceGuard workspaceGuard;
+
+    public WorkspaceDiffService(SandboxWorkspaceGuard workspaceGuard) {
+        this.workspaceGuard = workspaceGuard; // diff 提取前复用 P9 路径护栏。
+    }
 
     public WorkspaceDiffResult collect(Path workspace) {
-        assertGitWorkspace(workspace);
+        Path safeWorkspace = workspaceGuard.validateWorkspacePath(workspace); // 只能读取 sandboxRoot 内的 workspace。
+        assertGitWorkspace(safeWorkspace);
         WorkspaceDiffResult result = new WorkspaceDiffResult();
-        List<StatusEntry> statusEntries = readStatus(workspace);
+        List<StatusEntry> statusEntries = readStatus(safeWorkspace);
         List<String> changedFiles = statusEntries.stream()
                 .map(StatusEntry::path)
                 .filter(path -> path != null && !path.isBlank())
                 .distinct()
                 .toList();
         result.setChangedFiles(changedFiles);
-        result.setDiff(readDiff(workspace, statusEntries));
+        result.setDiff(readDiff(safeWorkspace, statusEntries));
         return result;
     }
 

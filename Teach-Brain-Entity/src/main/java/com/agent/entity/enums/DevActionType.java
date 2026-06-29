@@ -25,7 +25,8 @@ public enum DevActionType {
     SANDBOX_WORKSPACE_CREATED, // P9 创建隔离沙箱 workspace。
     SANDBOX_WORKSPACE_CLEANED, // P9 清理旧沙箱 workspace。
     SANDBOX_WORKSPACE_RESTORED, // P9 恢复沙箱 workspace 干净状态。
-    SANDBOX_WORKSPACE_VALIDATED; // P9 校验 Claude Code 工作目录。
+    SANDBOX_WORKSPACE_VALIDATED, // P9 校验 Claude Code 工作目录。
+    PATCH_APPLIED; // P10 在受控 sandbox workspace 中应用 patch。
 
     public static DevActionType fromName(String raw) {
         if (raw == null || raw.isBlank()) {

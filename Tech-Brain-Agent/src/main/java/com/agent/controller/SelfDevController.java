@@ -84,6 +84,7 @@ public class SelfDevController {
             if (owner) {
                 result.setSandboxWorkspaceDir(sandbox.toString());
                 result.setAvailableProjects(safeListProjects());
+                result.setAvailableWorkspaceIds(safeListWorkspaceIds());
             }
         } catch (Exception e) {
             result.setSandboxConfigured(false);
@@ -222,6 +223,14 @@ public class SelfDevController {
     private List<String> safeListProjects() {
         try {
             return workspaceGuard.listProjects();
+        } catch (Exception e) {
+            return java.util.Collections.emptyList();
+        }
+    }
+
+    private List<String> safeListWorkspaceIds() {
+        try {
+            return workspaceGuard.listWorkspaceIds();
         } catch (Exception e) {
             return java.util.Collections.emptyList();
         }
