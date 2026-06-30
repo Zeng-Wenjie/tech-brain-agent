@@ -188,6 +188,19 @@ techbrain:
       max-changed-files: ${TECHBRAIN_SELFDEV_PATCH_MAX_CHANGED_FILES:50}
       max-patch-size-kb: ${TECHBRAIN_SELFDEV_PATCH_MAX_SIZE_KB:1024}
       max-operation-timeout-seconds: ${TECHBRAIN_SELFDEV_PATCH_TIMEOUT_SECONDS:120}
+    compile:
+      maven:
+        executable: ${TECHBRAIN_SELFDEV_MAVEN_EXECUTABLE:mvn}
+        default-timeout-seconds: ${TECHBRAIN_SELFDEV_MAVEN_DEFAULT_TIMEOUT_SECONDS:180}
+        max-timeout-seconds: ${TECHBRAIN_SELFDEV_MAVEN_MAX_TIMEOUT_SECONDS:600}
+        default-skip-tests: ${TECHBRAIN_SELFDEV_MAVEN_DEFAULT_SKIP_TESTS:true}
+        max-output-chars: ${TECHBRAIN_SELFDEV_MAVEN_MAX_OUTPUT_CHARS:60000}
+        max-error-summary-chars: ${TECHBRAIN_SELFDEV_MAVEN_MAX_ERROR_SUMMARY_CHARS:12000}
+        allowed-extra-args:
+          - -q
+          - -U
+          - -e
+          - -X
   self-dev:
     sandbox-workspace-dir: ${TECHBRAIN_SELF_DEV_SANDBOX:D:/JavaAgent/Tech-Brain-sandbox}
     owner-user-ids: []

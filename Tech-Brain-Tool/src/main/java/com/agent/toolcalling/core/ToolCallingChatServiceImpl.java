@@ -48,6 +48,7 @@ public class ToolCallingChatServiceImpl implements ToolCallingChatService {
     private static final String SUMMARIZE_ARTICLE_TOOL_NAME = "summarizeArticle";
     private static final String READ_FILE_TOOL_NAME = "readFile";
     private static final String APPLY_PATCH_TOOL_NAME = "applyPatch";
+    private static final String RUN_MAVEN_COMPILE_TOOL_NAME = "runMavenCompile";
     private static final String ARTICLE_SUMMARY_RESULT_TYPE = "article_summary";
     private static final String SUMMARY_RESULT_EVENT_NAME = "summary_result";
 
@@ -57,6 +58,7 @@ public class ToolCallingChatServiceImpl implements ToolCallingChatService {
     private static final String ROUTE_REASON_FORCE_SUMMARIZE_ARTICLE = "force summarizeArticle";
     private static final String ROUTE_REASON_FORCE_READ_FILE = "force readFile";
     private static final String ROUTE_REASON_FORCE_APPLY_PATCH = "force applyPatch";
+    private static final String ROUTE_REASON_FORCE_RUN_MAVEN_COMPILE = "force runMavenCompile";
     private static final String ROUTE_REASON_MODEL_TOOL_CALL = "model tool_call";
 
     private static final String TOOL_TYPE_RAG = "RAG";
@@ -69,6 +71,9 @@ public class ToolCallingChatServiceImpl implements ToolCallingChatService {
     private static final Pattern FILE_ID_PATTERN = Pattern.compile("(?:fileId|文件|附件|ID|id)\\s*[:：#]??\\s*(\\d+)");
     private static final Pattern WORKSPACE_ID_PATTERN = Pattern.compile("(?i)workspaceId\\s*[:=]\\s*([A-Za-z0-9._-]+)");
     private static final Pattern PATCH_FILE_PATH_PATTERN = Pattern.compile("(?i)patchFilePath\\s*[:=]\\s*([^\\s]+)");
+    private static final Pattern MODULE_PATTERN = Pattern.compile("(?i)(?:module|模块)\\s*[:=：]\\s*([A-Za-z0-9._-]+)");
+    private static final Pattern TIMEOUT_SECONDS_PATTERN = Pattern.compile("(?i)(?:timeoutSeconds|timeout|超时)\\s*[:=：]\\s*(\\d+)");
+    private static final Pattern PROFILES_PATTERN = Pattern.compile("(?i)(?:profiles|profile|配置)\\s*[:=：]\\s*([A-Za-z0-9._,-]+)");
 
     private static final String CONTEXT_PRIORITY_PROMPT = "\n\n上下文优先级从高到低："
             + "\n1. 当前用户输入 currentMessage。"
@@ -155,6 +160,11 @@ public class ToolCallingChatServiceImpl implements ToolCallingChatService {
                 return;
             }
 
+            if (shouldForceRunMavenCompile(userMessage, requestContext)) {
+                streamWithForcedRunMavenCompile(userMessage, safeMemorySummary, safeHistory, requestContext, callback);
+                return;
+            }
+
             if (shouldForceApplyPatch(userMessage, requestContext)) {
                 streamWithForcedApplyPatch(userMessage, safeMemorySummary, safeHistory, requestContext, callback);
                 return;
@@ -235,6 +245,23 @@ public class ToolCallingChatServiceImpl implements ToolCallingChatService {
         streamModel(buildForcedToolAnswerRequest("你是 Tech-Brain 项目的 AI 助手。本轮已经执行 applyPatch 工具。必须基于工具 JSON 结果回答；成功时只提示可进入 P11 编译验证，不要声称已经编译或发布。"
                         + CONTEXT_PRIORITY_PROMPT,
                 userMessage, memorySummary, historyMessages, APPLY_PATCH_TOOL_NAME, arguments, toolResult, requestContext), callback); // 把工具结果交给模型生成最终回答。
+    }
+
+    private void streamWithForcedRunMavenCompile(String userMessage,
+                                                 String memorySummary,
+                                                 List<ToolChatHistoryMessage> historyMessages,
+                                                 ToolCallingRequestContext requestContext,
+                                                 ToolCallingStreamCallback callback) {
+        AiTool compileTool = toolRegistry.getTool(RUN_MAVEN_COMPILE_TOOL_NAME); // 获取 runMavenCompile 工具。
+        if (compileTool == null) {
+            callback.onError(new IllegalStateException("runMavenCompile 工具未注册")); // 未注册时返回错误。
+            return;
+        }
+        ObjectNode arguments = buildForcedRunMavenCompileArguments(userMessage); // 从用户消息提取明确编译参数。
+        String toolResult = executeToolWithLog(compileTool, arguments, requestContext, CALL_SOURCE_FORCE_ROUTE, ROUTE_REASON_FORCE_RUN_MAVEN_COMPILE); // 执行并进入 tool_call_log。
+        streamModel(buildForcedToolAnswerRequest("你是 Tech-Brain 项目的 AI 助手。本轮已经执行 runMavenCompile 工具。必须基于工具 JSON 结果回答；成功时说明可进入 P12 前端构建验证，或如果本次没有前端改动可进入 P13 候选确认；失败时只总结错误摘要，不要自动修复代码、不要调用 Claude Code、不要生成或应用 patch、不要发布。"
+                        + CONTEXT_PRIORITY_PROMPT,
+                userMessage, memorySummary, historyMessages, RUN_MAVEN_COMPILE_TOOL_NAME, arguments, toolResult, requestContext), callback); // 把工具结果交给模型生成最终回答。
     }
 
     private void streamWithForcedReadFile(String userMessage,
@@ -494,6 +521,87 @@ public class ToolCallingChatServiceImpl implements ToolCallingChatService {
         return !isAttachmentIntent(userMessage, requestContext);
     }
 
+    private boolean shouldForceRunMavenCompile(String userMessage, ToolCallingRequestContext requestContext) {
+        if (isBlank(userMessage)) {
+            return false; // 空消息不路由。
+        }
+        String text = userMessage.toLowerCase(Locale.ROOT); // 统一小写判断。
+        if (containsAny(text, "怎么编译", "编译命令是什么", "maven compile 是什么", "什么是 maven compile")) {
+            return false; // 说明类问题不执行工具。
+        }
+        boolean compileIntent = containsAny(text,
+                "编译验证", "运行 maven 编译", "执行 mvn compile", "后端编译", "验证后端能不能编译",
+                "对这个 workspace 做编译验证", "应用 patch 后编译一下", "mvn compile", "run maven compile"); // 明确 P11 意图。
+        boolean hasWorkspaceId = WORKSPACE_ID_PATTERN.matcher(userMessage).find(); // 必须提供 workspaceId。
+        boolean hasConfirmToken = userMessage.contains("RUN_COMPILE"); // 必须提供确认标记。
+        return compileIntent && hasWorkspaceId && hasConfirmToken; // 三项齐备才强制路由。
+    }
+
+    private ObjectNode buildForcedRunMavenCompileArguments(String userMessage) {
+        ObjectNode arguments = objectMapper.createObjectNode(); // 构造 runMavenCompile 参数。
+        String workspaceId = extractFirstGroup(WORKSPACE_ID_PATTERN, userMessage); // 提取 workspaceId。
+        if (!isBlank(workspaceId)) {
+            arguments.put("workspaceId", workspaceId); // 写入 workspaceId。
+        }
+        String module = extractFirstGroup(MODULE_PATTERN, userMessage); // 提取 module。
+        if (!isBlank(module)) {
+            arguments.put("module", module); // 写入 module。
+        }
+        ArrayNode profiles = extractCommaSeparatedArray(PROFILES_PATTERN, userMessage); // 提取 profiles。
+        if (profiles.size() > 0) {
+            arguments.set("profiles", profiles); // 写入 profiles。
+        }
+        ArrayNode extraArgs = objectMapper.createArrayNode(); // 只允许前端强制路由识别白名单额外参数。
+        String text = userMessage.toLowerCase(Locale.ROOT); // 小写用于匹配。
+        appendExtraArgIfPresent(extraArgs, text, "-q"); // quiet 参数。
+        appendExtraArgIfPresent(extraArgs, text, "-u"); // update 参数。
+        appendExtraArgIfPresent(extraArgs, text, "-e"); // errors 参数。
+        appendExtraArgIfPresent(extraArgs, text, "-x"); // debug 参数。
+        if (extraArgs.size() > 0) {
+            normalizeExtraArgs(extraArgs); // 将大小写无关标记规范成 Maven 原参数。
+            arguments.set("extraArgs", extraArgs); // 写入 extraArgs。
+        }
+        String timeout = extractFirstGroup(TIMEOUT_SECONDS_PATTERN, userMessage); // 提取 timeoutSeconds。
+        if (!isBlank(timeout)) {
+            arguments.put("timeoutSeconds", Integer.parseInt(timeout)); // 写入超时秒数。
+        }
+        arguments.put("skipTests", !containsAny(text, "skiptests=false", "不跳过测试")); // 默认跳过测试。
+        arguments.put("requireConfirm", true); // P11 默认需要确认。
+        arguments.put("confirmToken", "RUN_COMPILE"); // 明确确认 token。
+        return arguments; // 返回参数。
+    }
+
+    private ArrayNode extractCommaSeparatedArray(Pattern pattern, String text) {
+        ArrayNode array = objectMapper.createArrayNode(); // 创建数组。
+        String raw = extractFirstGroup(pattern, text); // 提取匹配值。
+        if (isBlank(raw)) {
+            return array; // 未提供时返回空数组。
+        }
+        for (String part : raw.split(",")) {
+            if (!isBlank(part)) {
+                array.add(part.trim()); // 添加非空 profile。
+            }
+        }
+        return array; // 返回数组。
+    }
+
+    private void appendExtraArgIfPresent(ArrayNode extraArgs, String text, String arg) {
+        if (text != null && text.contains(arg)) {
+            extraArgs.add(arg); // 只添加消息中出现的白名单参数。
+        }
+    }
+
+    private void normalizeExtraArgs(ArrayNode extraArgs) {
+        for (int i = 0; i < extraArgs.size(); i++) {
+            String value = extraArgs.get(i).asText(); // 读取当前参数。
+            if ("-u".equals(value)) {
+                extraArgs.set(i, objectMapper.getNodeFactory().textNode("-U")); // Maven 使用大写 -U。
+            } else if ("-x".equals(value)) {
+                extraArgs.set(i, objectMapper.getNodeFactory().textNode("-X")); // Maven 使用大写 -X。
+            }
+        }
+    }
+
     private boolean shouldForceApplyPatch(String userMessage, ToolCallingRequestContext requestContext) {
         if (isBlank(userMessage)) {
             return false; // 空消息不路由。
@@ -704,6 +812,9 @@ public class ToolCallingChatServiceImpl implements ToolCallingChatService {
     }
 
     private String serializeArgumentsForLog(String toolName, JsonNode arguments) {
+        if (RUN_MAVEN_COMPILE_TOOL_NAME.equals(toolName)) {
+            return serializeRunMavenCompileArgumentsForLog(arguments); // P11 参数日志只保存审计摘要。
+        }
         if (!APPLY_PATCH_TOOL_NAME.equals(toolName)) {
             return serialize(arguments); // 其它工具保持原有日志参数。
         }
@@ -732,6 +843,28 @@ public class ToolCallingChatServiceImpl implements ToolCallingChatService {
             return objectMapper.writeValueAsString(sanitized); // 返回脱敏参数。
         } catch (Exception e) {
             return "{\"tool\":\"applyPatch\",\"argumentsRedacted\":true,\"error\":\"failed to sanitize arguments\"}"; // 脱敏失败兜底。
+        }
+    }
+
+    private String serializeRunMavenCompileArgumentsForLog(JsonNode arguments) {
+        try {
+            ObjectNode sanitized = objectMapper.createObjectNode(); // runMavenCompile 参数脱敏副本。
+            copyTextForLog(arguments, sanitized, "workspaceId", false); // workspaceId 可记录。
+            copyTextForLog(arguments, sanitized, "workspacePath", true); // workspacePath 可能是绝对路径，需脱敏。
+            copyTextForLog(arguments, sanitized, "module", false); // module 可记录。
+            if (arguments != null && arguments.path("profiles").isArray()) {
+                sanitized.set("profiles", arguments.path("profiles")); // profiles 可记录。
+            }
+            if (arguments != null && arguments.path("extraArgs").isArray()) {
+                sanitized.set("extraArgs", arguments.path("extraArgs")); // 白名单 Maven 参数可记录。
+            }
+            copyScalarForLog(arguments, sanitized, "skipTests"); // skipTests 可记录。
+            copyScalarForLog(arguments, sanitized, "timeoutSeconds"); // timeoutSeconds 可记录。
+            copyScalarForLog(arguments, sanitized, "requireConfirm"); // requireConfirm 可记录。
+            sanitized.put("confirmTokenPresent", arguments != null && !arguments.path("confirmToken").asText("").isBlank()); // 只记录是否提供确认标记。
+            return objectMapper.writeValueAsString(sanitized); // 返回脱敏参数。
+        } catch (Exception e) {
+            return "{\"tool\":\"runMavenCompile\",\"argumentsRedacted\":true,\"error\":\"failed to sanitize arguments\"}"; // 脱敏失败兜底。
         }
     }
 
@@ -787,6 +920,9 @@ public class ToolCallingChatServiceImpl implements ToolCallingChatService {
         }
         if (APPLY_PATCH_TOOL_NAME.equals(toolName)) {
             return TOOL_TYPE_SELF_DEV; // P10 applyPatch 属于自迭代高风险写操作，日志中单独标记。
+        }
+        if (RUN_MAVEN_COMPILE_TOOL_NAME.equals(toolName)) {
+            return TOOL_TYPE_SELF_DEV; // P11 runMavenCompile 属于自迭代命令执行能力。
         }
         return TOOL_TYPE_OTHER;
     }
